@@ -44,6 +44,15 @@ jobs:
         # The zip itself is NOT committed (too large); only the compact JSON is.
         run: python build_schedule.py
 
+      - name: Find stop id (diagnostic)
+        run: |
+          curl -sSL -o gtfs.zip "$(python -c 'import yaml;print(yaml.safe_load(open("config.yaml"))["gtfs_static_zip_url"])')"
+          unzip -o gtfs.zip stops.txt
+          echo "=== Adelaide + Edward ==="
+          grep -i adelaide stops.txt | grep -i edward || echo none
+          echo "=== any Edward St stops (first 50) ==="
+          grep -i edward stops.txt | head -50
+
       - name: Commit updated stop_schedule.json
         run: |
           git config user.name  "github-actions[bot]"
