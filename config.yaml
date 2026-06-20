@@ -1,0 +1,57 @@
+# ============================================================
+# QLD Bus Departure Sign — Cloud Backend Configuration
+# ============================================================
+# This file is used by build_schedule.py and update_departures.py.
+# Edit the values below, then:
+#   1. Run build_schedule.py once to generate stop_schedule.json.
+#   2. Commit everything and push — GitHub Actions handles the rest.
+# ============================================================
+
+# ---- Stop IDs -------------------------------------------------
+# One or more Translink stop IDs to monitor.
+# How to find your stop_id:
+#   Option A: Go to https://jp.translink.com.au, search for your stop.
+#             The stop_id appears in the URL or the stop detail page.
+#   Option B: Download the static GTFS zip (see gtfs_static_zip_url below),
+#             open stops.txt, and search for your stop name.
+#             The first column (stop_id) is what you need here.
+#   Option C: Use the Translink GTFS API explorer at
+#             https://www.data.qld.gov.au/dataset/general-transit-feed-specification-gtfs-seq
+# Example SEQ stop IDs (replace with your own):
+#   600029  = Queen St Bus Station, Stop A
+#   600030  = Queen St Bus Station, Stop B
+stop_ids:
+  - "REPLACE_ME"   # TODO: GTFS stop_id for "Adelaide St, Stop 24 near Edward St" (routes 320/322)
+
+# ---- Route filter (optional) ----------------------------------
+# If non-empty, only services with these route_short_names are shown.
+# Leave empty (or comment out) to show ALL routes serving your stops.
+# Examples: "130", "412", "66"
+route_filter:
+  - "320"
+  - "322"
+
+# ---- Display --------------------------------------------------
+# Text shown in the header of the sign (max ~28 chars for readability).
+stop_label: "Adelaide St, Stop 24 near Edward St"
+
+# Maximum departure rows in the JSON (firmware uses this; default 8).
+max_rows: 7
+
+# Timezone for departure times. Must be a TZ database name.
+# Brisbane has no DST, so utc_offset_seconds will always be 36000.
+timezone: "Australia/Brisbane"
+
+# ---- GTFS Feed URLs -------------------------------------------
+# Real-time TripUpdates protobuf (GTFS-RT v2.0, public, no API key required).
+rt_trip_updates_url: "https://gtfsrt.api.translink.com.au/api/realtime/SEQ/TripUpdates"
+
+# Static GTFS schedule ZIP (~28 MB).
+# IMPORTANT: This URL sometimes changes. If it returns 404, check:
+#   https://www.data.qld.gov.au/dataset/general-transit-feed-specification-gtfs-seq
+# and copy the current download link for "GTFS - SEQ".
+gtfs_static_zip_url: "https://gtfsrt.api.translink.com.au/GTFS/SEQ_GTFS.zip"
+
+# ---- Timeouts -------------------------------------------------
+# Timeout (seconds) for network requests to Translink feeds.
+feed_timeout_seconds: 15

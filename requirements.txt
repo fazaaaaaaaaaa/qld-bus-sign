@@ -1,0 +1,24 @@
+# Cloud backend requirements
+# Install with: pip install -r requirements.txt
+
+# HTTP client used for both the RT protobuf feed and static GTFS zip download.
+requests>=2.31.0
+
+# GTFS-RT protobuf parsing (official Google package).
+gtfs-realtime-bindings>=1.0.0
+
+# Protobuf runtime (required by gtfs-realtime-bindings).
+protobuf>=4.21.0
+
+# YAML config parsing.
+pyyaml>=6.0
+
+# Timezone data — required for zoneinfo on systems that lack the IANA tz DB
+# (some minimal Linux containers, Windows). Safe to include always.
+# On Python >= 3.9 this is the stdlib zoneinfo fallback data package.
+tzdata>=2023.3
+
+# -----------------------------------------------------------------------
+# Optional — only needed for render_preview.py (not used in CI):
+# -----------------------------------------------------------------------
+# pillow>=10.0.0

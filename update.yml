@@ -1,0 +1,77 @@
+# update.yml — Frequent job: fetch RT, merge schedule, publish departures.json
+#
+# Runs every 10 minutes and deploys cloud/public/ to GitHub Pages.
+#
+# WHY 10 MINUTES, NOT 5:
+#   GitHub Pages has a soft limit of ~10 deploys/hour per repo.
+#   At 5-min intervals that is 12 deploys/hour — slightly over the limit,
+#   causing sporadic rate-limit failures.  10-min intervals give 6/hour,
+#   well within the limit.  The sign still shows correct countdowns because
+#   the firmware computes "minutes until departure" from the absolute epoch
+#   times in the JSON, so a 10-minute-old file is perfectly usable.
+#
+# NOTE: GitHub's cron scheduler may be delayed several minutes under load —
+#   that is also fine for the same reason (absolute epoch times, not relative).
+#
+# SETUP:
+#  1. Go to your repo Settings → Pages → Source → GitHub Actions.
+#  2. Make sure stop_schedule.json exists (run the build-schedule workflow first).
+#  3. Push this workflow — it auto-runs every 10 minutes.
+
+name: Update Departures
+
+on:
+  schedule:
+    # Every 10 minutes.  Pages soft-limit is ~10 deploys/hour; this gives 6/hour.
+    - cron: "*/10 * * * *"
+  # Also allow manual trigger from the Actions tab for testing.
+  workflow_dispatch:
+
+# Required to deploy to GitHub Pages.
+permissions:
+  pages: write
+  id-token: write
+
+# Only one deployment runs at a time.  cancel-in-progress: true means that if
+# a new run starts while an older one is still deploying, the OLDER run is
+# cancelled and the NEWER (fresher data) run takes over.  This is the correct
+# behaviour for a continuous publish pipeline.
+concurrency:
+  group: pages-deploy
+  cancel-in-progress: true
+
+jobs:
+  update-and-deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r cloud/requirements.txt
+
+      - name: Run update_departures.py
+        # Run from cloud/ so relative paths (stop_schedule.json, public/) resolve correctly.
+        # If the RT feed is down, the script still exits 0 with scheduled-only data.
+        run: |
+          cd cloud
+          python update_departures.py
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          # Only the public/ subdirectory is published.
+          path: cloud/public
+
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v4

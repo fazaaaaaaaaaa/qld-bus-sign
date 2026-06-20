@@ -1,0 +1,56 @@
+# build-schedule.yml — One-off / weekly job: download static GTFS, build stop_schedule.json
+#
+# Run this once at initial setup, then it auto-refreshes every Sunday at 03:17 UTC.
+# The job downloads the ~28 MB GTFS zip, parses it for your configured stop_ids,
+# and commits the compact stop_schedule.json back to the repo so that the frequent
+# update job never needs the large download.
+#
+# SETUP (first time):
+#  1. Edit cloud/config.yaml — set your stop_ids, stop_label, etc.
+#  2. Go to Actions tab → "Build Schedule" → Run workflow.
+#  3. Check that stop_schedule.json appears in the repo root of cloud/.
+#  4. The update workflow will now work automatically.
+
+name: Build Schedule
+
+on:
+  # Run manually from the Actions tab (use this for first-time setup).
+  workflow_dispatch:
+  # Auto-refresh weekly — Sundays at 03:17 UTC (stagger avoids top-of-hour congestion).
+  schedule:
+    - cron: "17 3 * * 0"
+
+permissions:
+  contents: write  # needed to commit stop_schedule.json back to the repo
+
+jobs:
+  build-schedule:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r cloud/requirements.txt
+
+      - name: Run build_schedule.py
+        # Downloads the GTFS zip (~28 MB), parses it, writes cloud/stop_schedule.json.
+        # The zip itself is NOT committed (too large); only the compact JSON is.
+        run: |
+          cd cloud
+          python build_schedule.py
+
+      - name: Commit updated stop_schedule.json
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add cloud/stop_schedule.json
+          # Only commit if there are actual changes (avoids empty commits).
+          git diff --cached --quiet || git commit -m "chore: refresh stop_schedule.json [skip ci]"
+          git push
