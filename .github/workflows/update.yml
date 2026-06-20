@@ -57,20 +57,18 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install -r cloud/requirements.txt
+        run: pip install -r requirements.txt
 
       - name: Run update_departures.py
-        # Run from cloud/ so relative paths (stop_schedule.json, public/) resolve correctly.
+        # Paths (config.yaml, stop_schedule.json, public/) resolve relative to the script.
         # If the RT feed is down, the script still exits 0 with scheduled-only data.
-        run: |
-          cd cloud
-          python update_departures.py
+        run: python update_departures.py
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
           # Only the public/ subdirectory is published.
-          path: cloud/public
+          path: public
 
       - name: Deploy to GitHub Pages
         id: deploy
