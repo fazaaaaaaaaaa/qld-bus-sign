@@ -180,14 +180,20 @@ function getUtcOffsetSeconds(epochMs: number): number {
     fmt.formatToParts(epochMs).map((p) => [p.type, p.value]),
   );
   // Reconstruct a UTC timestamp from local parts and subtract to get offset.
+  // When hour12:false, some Intl implementations emit "24" for midnight.
+  // Treat hour=24 as hour=0 of the NEXT day (add 86400000 ms) so the
+  // reconstructed localEpochMs is correct and the subtraction gives the right offset.
+  const rawHour = parseInt(parts.hour);
+  const hourForUtc = rawHour % 24;
+  const midnightCarry = rawHour === 24 ? 86400000 : 0;
   const localEpochMs = Date.UTC(
     parseInt(parts.year),
     parseInt(parts.month) - 1,
     parseInt(parts.day),
-    parseInt(parts.hour) % 24, // hour can be 24 at midnight
+    hourForUtc,
     parseInt(parts.minute),
     parseInt(parts.second),
-  );
+  ) + midnightCarry;
   return Math.round((localEpochMs - epochMs) / 1000);
 }
 
@@ -372,9 +378,13 @@ async function fetchRt(url: string): Promise<RtMap> {
       if (!sid) continue;
       const depTime = stu.departure?.time;
       const arrTime = stu.arrival?.time;
-      // gtfs-realtime-bindings encodes int64 as Long objects; coerce to number.
-      const depEpoch = depTime != null ? Number(depTime) || null : null;
-      const arrEpoch = arrTime != null ? Number(arrTime) || null : null;
+      // gtfs-realtime-bindings encodes int64 as protobufjs Long objects.
+      // Number() calls Long.prototype.toNumber() and gives a JS number.
+      // Treat 0 (protobufjs default for unset int64) as absent, not a real epoch.
+      const depRaw = depTime != null ? Number(depTime) : 0;
+      const arrRaw = arrTime != null ? Number(arrTime) : 0;
+      const depEpoch: number | null = depRaw > 0 ? depRaw : null;
+      const arrEpoch: number | null = arrRaw > 0 ? arrRaw : null;
       stops[sid] = {
         departure_epoch: depEpoch,
         arrival_epoch: arrEpoch,
