@@ -27,8 +27,13 @@ on:
   # Also allow manual trigger from the Actions tab for testing.
   workflow_dispatch:
 
-# Required to deploy to GitHub Pages.
+# Required permissions:
+#   contents: read   — actions/checkout@v4 needs this (any explicit permissions block
+#                      drops ALL defaults, so read must be listed explicitly)
+#   pages: write     — actions/deploy-pages needs this to publish the artifact
+#   id-token: write  — OIDC token required by actions/deploy-pages for auth
 permissions:
+  contents: read
   pages: write
   id-token: write
 
