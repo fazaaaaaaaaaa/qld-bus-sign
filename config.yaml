@@ -21,7 +21,7 @@
 #   600029  = Queen St Bus Station, Stop A
 #   600030  = Queen St Bus Station, Stop B
 stop_ids:
-  - "REPLACE_ME"   # TODO: GTFS stop_id for "Adelaide St, Stop 24 near Edward St" (routes 320/322)
+  - "000024"       # Adelaide St, Stop 24 near Edward St (routes 320/322)
 
 # ---- Route filter (optional) ----------------------------------
 # If non-empty, only services with these route_short_names are shown.
