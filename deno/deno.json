@@ -1,12 +1,7 @@
 {
-  "name": "qld-bus-sign",
-  "version": "1.0.0",
   "tasks": {
     "dev": "deno run --unstable-cron --unstable-kv -A main.ts",
     "start": "deno run --unstable-cron --unstable-kv -A main.ts"
-  },
-  "imports": {
-    "npm:gtfs-realtime-bindings": "npm:gtfs-realtime-bindings@1.2.1"
   },
   "lint": {
     "rules": {

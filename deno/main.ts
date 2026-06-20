@@ -14,7 +14,12 @@
  *   { stop_label, generated_at, utc_offset_seconds, departures: [{route,dest,time,live,cancelled}] }
  */
 
-import { FeedMessage } from "npm:gtfs-realtime-bindings@1.2.1";
+// gtfs-realtime-bindings is a CommonJS package; import the namespace and handle
+// both default-export and namespace shapes for robust Deno/npm interop.
+import * as GtfsRtNS from "npm:gtfs-realtime-bindings@1.1.1";
+// deno-lint-ignore no-explicit-any
+const GtfsRt: any = (GtfsRtNS as any).default ?? GtfsRtNS;
+const FeedMessage = GtfsRt.transit_realtime.FeedMessage;
 
 // ---------------------------------------------------------------------------
 // CONFIG — edit these values directly, or override via Deno.env
