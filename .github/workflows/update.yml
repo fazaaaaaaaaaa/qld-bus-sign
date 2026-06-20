@@ -1,29 +1,29 @@
 # update.yml — Frequent job: fetch RT, merge schedule, publish departures.json
 #
-# Runs every 10 minutes and deploys cloud/public/ to GitHub Pages.
+# Runs every 5 minutes and deploys public/ to GitHub Pages.
 #
-# WHY 10 MINUTES, NOT 5:
-#   GitHub Pages has a soft limit of ~10 deploys/hour per repo.
-#   At 5-min intervals that is 12 deploys/hour — slightly over the limit,
-#   causing sporadic rate-limit failures.  10-min intervals give 6/hour,
-#   well within the limit.  The sign still shows correct countdowns because
-#   the firmware computes "minutes until departure" from the absolute epoch
-#   times in the JSON, so a 10-minute-old file is perfectly usable.
+# REFRESH RATE:
+#   5 minutes is the FASTEST a GitHub Actions cron can run (documented minimum).
+#   The ~10-builds/hour GitHub Pages limit does NOT apply here — that limit is
+#   only for the default Jekyll build; custom Actions deploy workflows (this one,
+#   via actions/deploy-pages) are exempt.  The sign shows accurate countdowns
+#   regardless of file age because the firmware computes "minutes until departure"
+#   from the absolute epoch times in the JSON — a slightly stale file is still correct.
 #
-# NOTE: GitHub's cron scheduler may be delayed several minutes under load —
-#   that is also fine for the same reason (absolute epoch times, not relative).
+# NOTE: GitHub's cron can be delayed a few minutes under load.  For guaranteed
+#   sub-5-minute refresh, move this job to a host with 1-minute cron (e.g. Deno Deploy).
 #
 # SETUP:
 #  1. Go to your repo Settings → Pages → Source → GitHub Actions.
 #  2. Make sure stop_schedule.json exists (run the build-schedule workflow first).
-#  3. Push this workflow — it auto-runs every 10 minutes.
+#  3. Push this workflow — it auto-runs every 5 minutes.
 
 name: Update Departures
 
 on:
   schedule:
-    # Every 10 minutes.  Pages soft-limit is ~10 deploys/hour; this gives 6/hour.
-    - cron: "*/10 * * * *"
+    # Every 5 minutes — the fastest GitHub Actions cron allows.
+    - cron: "*/5 * * * *"
   # Also allow manual trigger from the Actions tab for testing.
   workflow_dispatch:
 
