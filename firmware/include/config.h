@@ -76,7 +76,7 @@
 // IMPORTANT: This must be an HTTPS URL.  HTTP is rejected by WiFiClientSecure.
 // The firmware uses client.setInsecure() by default (see USE_INSECURE_TLS).
 // -----------------------------------------------------------------------------
-#define DATA_URL  "https://fazaaaaaaaaaa.github.io/qld-bus-sign/departures.json"
+#define DATA_URL  "https://qld-bus-sign.fez-lively-05.workers.dev/departures.json"
 
 // -----------------------------------------------------------------------------
 // Refresh interval
@@ -389,7 +389,7 @@
 //   Set conservatively: an OTA that loses power mid-flash is recoverable
 //   (ESP32 has rollback support) but wastes time.  40% is a safe default.
 // -----------------------------------------------------------------------------
-#define FW_VERSION        "3.2.1"   // THIS build's version (compare vs JSON firmware.version)
+#define FW_VERSION        "3.2.2"   // THIS build's version (compare vs JSON firmware.version)
 #define ENABLE_OTA        1          // 1 = allow OTA from JSON firmware block; 0 = disabled
 #define OTA_MIN_BATT_PCT  40         // minimum battery % to start OTA (ignored if monitor off)
 
