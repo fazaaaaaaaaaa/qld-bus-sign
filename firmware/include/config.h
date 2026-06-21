@@ -49,8 +49,20 @@
 //   recommended; wastes battery on transient dropouts).
 // -----------------------------------------------------------------------------
 #define WIFI_PORTAL_AP_NAME     "QLD-Bus-Sign-Setup"
-#define WIFI_PORTAL_TIMEOUT_S   180
-#define WIFI_PORTAL_AFTER_FAILS 1
+#define WIFI_PORTAL_TIMEOUT_S   300
+#define WIFI_PORTAL_AFTER_FAILS 3
+
+// -----------------------------------------------------------------------------
+// Multi-network Wi-Fi memory (v3.1)
+//
+// MAX_WIFI_NETS — how many distinct Wi-Fi networks the sign remembers in NVS.
+//   The device stores up to this many (SSID, password) pairs and, on each wake,
+//   auto-joins whichever remembered network is in range (WiFiMulti).  This lets
+//   you move the sign between home / office / etc. without re-running the portal.
+//   When a NEW network is configured via the portal and the list is already full,
+//   the OLDEST entry (index 0) is dropped to make room.
+// -----------------------------------------------------------------------------
+#define MAX_WIFI_NETS 5   // remember up to 5 Wi-Fi networks (auto-join nearest)
 
 // -----------------------------------------------------------------------------
 // Departures JSON endpoint  (HTTPS — GitHub Pages or any static host)
@@ -317,7 +329,7 @@
 //   Set conservatively: an OTA that loses power mid-flash is recoverable
 //   (ESP32 has rollback support) but wastes time.  40% is a safe default.
 // -----------------------------------------------------------------------------
-#define FW_VERSION        "3.0.0"   // THIS build's version (compare vs JSON firmware.version)
+#define FW_VERSION        "3.1.0"   // THIS build's version (compare vs JSON firmware.version)
 #define ENABLE_OTA        1          // 1 = allow OTA from JSON firmware block; 0 = disabled
 #define OTA_MIN_BATT_PCT  40         // minimum battery % to start OTA (ignored if monitor off)
 
