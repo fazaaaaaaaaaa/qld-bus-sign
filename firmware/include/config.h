@@ -182,6 +182,66 @@
 #define EPD_BUSY  6    // Busy signal from panel (HIGH = busy)
 
 // -----------------------------------------------------------------------------
+// FEATURE 8 — Physical buttons: LEFT / RIGHT manual stop control (v3.2)
+//
+// Xteink X4 button hardware (verified against the Adafruit CircuitPython helper
+// library Adafruit_CircuitPython_Xteink_X4 and the Adafruit X4 pinout guide):
+//   - POWER button  → direct digital GPIO3 (board.BUTTON), active-LOW (pull-up).
+//   - The OTHER SIX buttons (Back/Confirm/Left/Right/Up/Down) are NOT on their
+//     own pins.  They are read via a RESISTOR LADDER on TWO ADC pins:
+//        GPIO1 (board.BUTTON_ADC_1) → Back, Confirm, LEFT, RIGHT
+//        GPIO2 (board.BUTTON_ADC_2) → Up, Down
+//     Each button pulls the shared ADC line to a distinct voltage; software
+//     reads analogRead() and compares it against per-button windows.
+//
+// >>> LEFT and RIGHT both live on ADC1 (GPIO1). <<<
+//
+// ADC thresholds — DERIVED from the Adafruit helper library's calibrated
+// 16-bit (0..65535) values, divided by 16 for the ESP32-C3 Arduino 12-bit
+// (0..4095) analogRead() scale:
+//     ADC1 idle  ~58107 / 16 ≈ 3632   (line rests HIGH when nothing pressed)
+//     Back       ~50972 / 16 ≈ 3186
+//     Confirm    ~39531 / 16 ≈ 2471
+//     LEFT       ~22083 / 16 ≈ 1380   (library window 11000..30000 → 688..1875)
+//     RIGHT          ~63 / 16 ≈    4   (library window     -1..11000 →   0..688)
+// The windows below are tightened around LEFT and RIGHT so they cannot be
+// confused with idle / Back / Confirm.  They are intentionally wide enough to
+// tolerate part-to-part ADC spread.
+//
+// *** CALIBRATION (do this once on YOUR unit) ***
+//   Every boot, and on every readButton(), the firmware prints e.g.:
+//       [BTN] adc1=NNNN adc2=NNNN -> LEFT     (or RIGHT / none)
+//   Watch the serial monitor at 115200 baud while pressing LEFT, then RIGHT,
+//   and note the adc1=NNNN value for each.  If a press is mis-read, set the
+//   matching window below so the printed value falls inside it:
+//       LEFT  press value should sit inside [BTN_LEFT_ADC_MIN  .. BTN_LEFT_ADC_MAX]
+//       RIGHT press value should sit inside [BTN_RIGHT_ADC_MIN .. BTN_RIGHT_ADC_MAX]
+//   Keep the two windows non-overlapping and clear of the idle value (~3632).
+//
+// BTN_ADC_LEFT_PIN / BTN_ADC_RIGHT_PIN: the GPIO each button's ladder sits on.
+//   On the X4 both are GPIO1 (ADC1); kept as two #defines for clarity and in
+//   case a future board splits them.  readButton() reads each pin once.
+// BTN_POWER_PIN: direct digital power button (GPIO3, active-LOW).  Used as an
+//   ADDITIONAL deep-sleep wake source (see main.cpp arming logic).
+// -----------------------------------------------------------------------------
+#define BTN_ADC_LEFT_PIN    1     // GPIO1 (BUTTON_ADC_1) — LEFT sits on this ADC ladder
+#define BTN_ADC_RIGHT_PIN   1     // GPIO1 (BUTTON_ADC_1) — RIGHT shares the same ADC ladder
+#define BTN_ADC_2_PIN       2     // GPIO2 (BUTTON_ADC_2) — Up/Down ladder; read only for calibration/debug
+#define BTN_POWER_PIN       3     // GPIO3 (board.BUTTON) — direct digital power btn, active-LOW
+
+#define BTN_LEFT_ADC_MIN    700   // LEFT  press: analogRead() window low  (12-bit)
+#define BTN_LEFT_ADC_MAX    1900  // LEFT  press: analogRead() window high (12-bit)
+#define BTN_RIGHT_ADC_MIN   0     // RIGHT press: analogRead() window low  (12-bit)
+#define BTN_RIGHT_ADC_MAX   680   // RIGHT press: analogRead() window high (12-bit)
+
+// BUTTON_HOLD_OVERRIDE — how long (ms) to keep polling readButton() right after
+// the board is rendered, so a press made while the screen is already awake also
+// switches the view (not just a press that wakes the device from deep sleep).
+// A short poll keeps wake time (and battery use) low.  Set to 0 to disable the
+// post-render poll entirely (button still works as a deep-sleep wake source).
+#define BUTTON_HOLD_OVERRIDE  1500   // ms to watch for a live button press after render
+
+// -----------------------------------------------------------------------------
 // Battery monitor (optional)
 //
 // The X4 routes battery voltage through a resistor divider to GPIO0.
@@ -231,7 +291,7 @@
 #define LATE_NIGHT_START_HOUR   1     // hour (local, 0–23) where long sleep begins
 #define LATE_NIGHT_END_HOUR     4     // hour (local, 0–23) where long sleep ends (exclusive)
 #define LATE_NIGHT_SLEEP_MIN    60    // sleep duration during late-night window (minutes)
-#define NO_SERVICE_SLEEP_MIN    20    // sleep duration when zero upcoming departures (minutes)
+#define NO_SERVICE_SLEEP_MIN    5     // sleep duration when zero upcoming departures (minutes) — keeps it lively + picks up first service fast
 
 // =============================================================================
 // ===  v3 CONTRACT ADDITIONS  =================================================
@@ -329,7 +389,7 @@
 //   Set conservatively: an OTA that loses power mid-flash is recoverable
 //   (ESP32 has rollback support) but wastes time.  40% is a safe default.
 // -----------------------------------------------------------------------------
-#define FW_VERSION        "3.1.0"   // THIS build's version (compare vs JSON firmware.version)
+#define FW_VERSION        "3.2.0"   // THIS build's version (compare vs JSON firmware.version)
 #define ENABLE_OTA        1          // 1 = allow OTA from JSON firmware block; 0 = disabled
 #define OTA_MIN_BATT_PCT  40         // minimum battery % to start OTA (ignored if monitor off)
 
