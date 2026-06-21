@@ -389,7 +389,10 @@
 //   Set conservatively: an OTA that loses power mid-flash is recoverable
 //   (ESP32 has rollback support) but wastes time.  40% is a safe default.
 // -----------------------------------------------------------------------------
-#define FW_VERSION        "3.2.2"   // THIS build's version (compare vs JSON firmware.version)
+#define FW_VERSION        "3.3.0"   // THIS build's version (compare vs JSON firmware.version)
+                                    // v3.3.0: live "Updated H:MMam" footer line that ticks every
+                                    //         wake (per-minute hash term forces a redraw), and
+                                    //         far-future departures show a clock time, not "612 min".
 #define ENABLE_OTA        1          // 1 = allow OTA from JSON firmware block; 0 = disabled
 #define OTA_MIN_BATT_PCT  40         // minimum battery % to start OTA (ignored if monitor off)
 
