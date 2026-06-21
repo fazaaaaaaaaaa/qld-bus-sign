@@ -50,10 +50,10 @@
     <h2>Step 1 — Back up the stock firmware (recommended)</h2>
     <div class="note">
       Installing <strong>erases</strong> the X4's original reader firmware, and the web installer can't read flash — so this backup is your <strong>only</strong> way back to stock. Do it once from a terminal (needs Python):
-      <pre>pip install esptool
-esptool.py --chip esp32c3 --baud 921600 read_flash 0x0 0x1000000 x4-stock-backup.bin</pre>
+      <pre>python3 -m pip install --user esptool
+python3 -m esptool --chip esp32c3 --baud 921600 read_flash 0x0 0x1000000 x4-stock-backup.bin</pre>
       That saves the full 16&nbsp;MB flash to <code>x4-stock-backup.bin</code> (~3&nbsp;min) — keep it somewhere safe. To return the X4 to stock later:
-      <pre>esptool.py --chip esp32c3 write_flash 0x0 x4-stock-backup.bin</pre>
+      <pre>python3 -m esptool --chip esp32c3 write_flash 0x0 x4-stock-backup.bin</pre>
       You <em>can</em> skip this, but there is no undo without it.
     </div>
 
@@ -69,7 +69,7 @@ esptool.py --chip esp32c3 --baud 921600 read_flash 0x0 0x1000000 x4-stock-backup
     <h2>What happens</h2>
     <ol>
       <li>Click <strong>Connect &amp; Install</strong>, then pick the X4's serial port (look for <em>“USB JTAG/serial”</em> or <em>ESP32-C3</em>). If nothing appears, re-seat the cable.</li>
-      <li>Choose <strong>Install</strong> and confirm <strong>Erase device</strong> when asked (clean install over the stock firmware). Takes about a minute.</li>
+      <li>Choose <strong>Install</strong> and let it write — it flashes the bus-sign app and <strong>keeps your X4's own bootloader</strong> intact (that's what makes it boot). Takes about a minute.</li>
       <li>When it finishes, unplug and re-plug, or just leave it powered.</li>
     </ol>
 
@@ -83,8 +83,8 @@ esptool.py --chip esp32c3 --baud 921600 read_flash 0x0 0x1000000 x4-stock-backup
     </div>
 
     <footer>
-      Prefer the command line? Download <a href="./firmware-merged.bin">firmware-merged.bin</a> and run<br>
-      <code>esptool.py --chip esp32c3 write_flash 0x0 firmware-merged.bin</code>
+      Prefer the command line? Download <a href="./partitions.bin">partitions.bin</a>, <a href="./boot_app0.bin">boot_app0.bin</a> &amp; <a href="./firmware.bin">firmware.bin</a>, then run<br>
+      <code>python3 -m esptool --chip esp32c3 write_flash 0x8000 partitions.bin 0xe000 boot_app0.bin 0x10000 firmware.bin</code>
     </footer>
   </div>
 
