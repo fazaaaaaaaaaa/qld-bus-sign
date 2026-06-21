@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Flash your QLD Bus Sign — Xteink X4</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    background: #0d1117; color: #e6edf3;
+    font: 16px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    padding: 28px;
+  }
+  .card {
+    width: 100%; max-width: 560px; background: #161b22; border: 1px solid #30363d;
+    border-radius: 14px; padding: 32px 30px; box-shadow: 0 10px 40px rgba(0,0,0,.4);
+  }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .sub { color: #8b949e; margin: 0 0 22px; font-size: 14px; }
+  .btnwrap { display: flex; justify-content: center; margin: 26px 0 8px; }
+  esp-web-install-button { --esp-tools-button-color: #fff; --esp-tools-button-text-color: #0d1117; }
+  ol { padding-left: 20px; margin: 8px 0 0; }
+  ol li { margin: 8px 0; }
+  h2 { font-size: 15px; text-transform: uppercase; letter-spacing: .04em; color: #8b949e; margin: 26px 0 8px; }
+  .note { background: #1f2630; border: 1px solid #30363d; border-radius: 10px; padding: 12px 14px; font-size: 14px; color: #c9d1d9; margin-top: 14px; }
+  .ok { color: #3fb950; } .warn { color: #d29922; }
+  code { background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 1px 6px; font-size: 13px; }
+  .unsupported { display: none; background: #2d2118; border: 1px solid #5a4626; color: #e3b341; border-radius: 10px; padding: 12px 14px; font-size: 14px; }
+  a { color: #58a6ff; }
+  footer { margin-top: 24px; color: #6e7681; font-size: 12.5px; text-align: center; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>🚌 Flash your QLD Bus Sign</h1>
+    <p class="sub">Xteink X4 · ESP32-C3 · one-click installer</p>
+
+    <p>This installs the live Brisbane bus-departure firmware onto your Xteink X4 directly from this page — no app, no toolchain.</p>
+
+    <h2>Before you start</h2>
+    <ol>
+      <li>Use <strong>Chrome</strong> or <strong>Edge</strong> on a <strong>desktop</strong> (Safari/Firefox can't talk to USB devices).</li>
+      <li>Plug the X4 into this computer with a <strong>USB-C data cable</strong> (not a charge-only cable).</li>
+      <li>No microSD card is needed — leave it out. The firmware lives on the internal flash.</li>
+    </ol>
+
+    <div class="btnwrap">
+      <esp-web-install-button manifest="./manifest.json">
+        <button slot="activate" style="font-size:16px;padding:12px 22px;border-radius:10px;border:0;background:#fff;color:#0d1117;font-weight:600;cursor:pointer;">⚡ Connect &amp; Install</button>
+        <span slot="unsupported" class="unsupported" style="display:block;">Your browser can't flash USB devices. Open this page in desktop Chrome or Edge.</span>
+        <span slot="not-allowed" class="unsupported" style="display:block;">Flashing is only allowed over HTTPS in Chrome/Edge.</span>
+      </esp-web-install-button>
+    </div>
+
+    <h2>What happens</h2>
+    <ol>
+      <li>Click <strong>Connect &amp; Install</strong>, then pick the X4's serial port (look for <em>“USB JTAG/serial”</em> or <em>ESP32-C3</em>). If nothing appears, re-seat the cable.</li>
+      <li>Choose <strong>Install</strong> and confirm <strong>Erase device</strong> when asked (clean install over the stock firmware). Takes about a minute.</li>
+      <li>When it finishes, unplug and re-plug, or just leave it powered.</li>
+    </ol>
+
+    <div class="note">
+      <strong class="ok">After flashing — set up WiFi from your phone:</strong><br>
+      The sign creates a WiFi network called <code>QLD-Bus-Sign-Setup</code>. Join it on your phone; a setup page pops up automatically. Pick your WiFi and enter the password. The board then shows your departures — <strong>before 2&nbsp;pm</strong> your home stop (Bonney Ave, route 320), <strong>from 2&nbsp;pm</strong> the city stop (Adelaide St, 320&nbsp;&amp;&nbsp;322). If the screen is upside-down, re-open that setup page and change rotation 1→3.
+    </div>
+
+    <div class="note">
+      <span class="warn">Heads-up:</span> this replaces the X4's stock reader firmware. Future updates happen automatically over WiFi (OTA) — you won't need this page again.
+    </div>
+
+    <footer>
+      Prefer the command line? Download <a href="./firmware-merged.bin">firmware-merged.bin</a> and run<br>
+      <code>esptool.py --chip esp32c3 write_flash 0x0 firmware-merged.bin</code>
+    </footer>
+  </div>
+
+  <script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js"></script>
+</body>
+</html>
