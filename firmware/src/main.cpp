@@ -87,6 +87,7 @@ RTC_DATA_ATTR static bool panelEverPainted    = false;  // FIX 1: true once the 
 // selection block this same cycle.  It is cleared back to -1 immediately after
 // being applied, so the NEXT scheduled (timer) wake returns to normal behaviour.
 RTC_DATA_ATTR static int  manualStopOverride  = -1;
+RTC_DATA_ATTR static int  btnRestartCount     = 0;   // v3.4.0: anti-loop guard for the LEFT/RIGHT poll restart (reset on every timer wake)
 
 // =============================================================================
 // g_pSetupDisplay — file-scope pointer used by the WiFiManager AP callback.
@@ -159,6 +160,8 @@ static String gDataUrl;        // effective DATA_URL
 static int    gRefreshMin;     // effective REFRESH_MINUTES
 static int    gRotation;       // effective EPD_ROTATION
 static int    gStopSwitchHour; // effective STOP_SWITCH_HOUR (Feature 5)
+static int    gPowerMode;      // effective POWER_MODE (Feature 10: 0=AUTO,1=AWAKE,2=SLEEP)
+static bool   gPowerAwake = false;  // resolved this wake: true=stay awake (USB), false=deep-sleep
 
 // =============================================================================
 // loadRuntimeSettings()
@@ -169,11 +172,13 @@ static void loadRuntimeSettings(Preferences& prefs)
     gRefreshMin     = prefs.getInt("refresh_m",        REFRESH_MINUTES);
     gRotation       = prefs.getInt("rotation",         EPD_ROTATION);
     gStopSwitchHour = prefs.getInt("stop_switch_h",    STOP_SWITCH_HOUR);
+    gPowerMode      = prefs.getInt("power_mode",       POWER_MODE);
 
     if (gRefreshMin < 1 || gRefreshMin > 60)       gRefreshMin     = REFRESH_MINUTES;
     if (gRotation < 0   || gRotation   > 3)        gRotation       = EPD_ROTATION;
     if (gDataUrl.length() == 0)                    gDataUrl        = DATA_URL;
     if (gStopSwitchHour < 0 || gStopSwitchHour > 23) gStopSwitchHour = STOP_SWITCH_HOUR;
+    if (gPowerMode < 0 || gPowerMode > 2)          gPowerMode      = POWER_MODE;
 
     // v3.2.2: one-time migration of existing devices off the old GitHub Pages
     // feed onto the new default (Cloudflare Worker) so reliable refresh kicks in
@@ -184,8 +189,8 @@ static void loadRuntimeSettings(Preferences& prefs)
         Serial.println("[NVS]  data_url migrated to new default (Cloudflare Worker)");
     }
 
-    Serial.printf("[NVS]  data_url=%s  refresh=%d min  rotation=%d  stop_switch_h=%d\n",
-                  gDataUrl.c_str(), gRefreshMin, gRotation, gStopSwitchHour);
+    Serial.printf("[NVS]  data_url=%s  refresh=%d min  rotation=%d  stop_switch_h=%d  power_mode=%d\n",
+                  gDataUrl.c_str(), gRefreshMin, gRotation, gStopSwitchHour, gPowerMode);
 }
 
 // =============================================================================
@@ -328,7 +333,8 @@ static void savePortalSettings(Preferences& prefs,
                                 const char* urlVal,
                                 const char* refreshVal,
                                 const char* rotationVal,
-                                const char* stopSwitchVal)
+                                const char* stopSwitchVal,
+                                const char* powerModeVal)
 {
     // ---- Data URL -----------------------------------------------------------
     String newUrl(urlVal);
@@ -369,6 +375,21 @@ static void savePortalSettings(Preferences& prefs,
         Serial.printf("[NVS]  Saved stop_switch_h=%d\n", newHour);
     } else {
         Serial.printf("[NVS]  Invalid stop_switch_h '%s' — keeping previous\n", stopSwitchVal);
+    }
+
+    // ---- Power mode (Feature 10) -------------------------------------------
+    {
+        String pm(powerModeVal); pm.trim();
+        if (pm.length() > 0) {
+            int newPm = pm.toInt();
+            if (newPm >= 0 && newPm <= 2) {
+                prefs.putInt("power_mode", newPm);
+                gPowerMode = newPm;
+                Serial.printf("[NVS]  Saved power_mode=%d\n", newPm);
+            } else {
+                Serial.printf("[NVS]  Invalid power_mode '%s' — keeping previous\n", powerModeVal);
+            }
+        }
     }
 }
 
@@ -495,15 +516,116 @@ static ButtonId readButton()
 //   enabled alongside, so the normal REFRESH_MINUTES schedule is untouched.
 static void armButtonWakeup()
 {
-    // v3.2.1: deep-sleep GPIO button wake is DISABLED for stability.
-    // On the real X4 unit the GPIO1 ladder idle level / ADC thresholds did not
-    // match the CircuitPython reference values, so a LOW-level wake on GPIO1
-    // fired spuriously (and the post-render poll saw phantom presses) — which
-    // made the device restart-loop into the WiFi portal.  Until the buttons are
-    // calibrated on-device (watch the "[BTN] adc1=.. adc2=.." serial readout and
-    // report the values), we wake on the TIMER only, exactly like the stable
-    // v3.1 — so the sign cannot loop.  No GPIO wake is armed here on purpose.
-    (void)0;
+    // v3.4.0: wake on the POWER button (GPIO3) ONLY.
+    //
+    // GPIO3 is a clean DIGITAL input with a hardware pull-up (idle HIGH, pressed
+    // LOW) — unlike the GPIO1 ADC resistor ladder, it does not produce spurious
+    // low-level wakes, so arming it is safe.  A power press therefore wakes the
+    // sign and triggers a fresh fetch+render ("refresh now"), and opens the short
+    // LEFT/RIGHT poll window (§17b) so the user can switch routes.
+    //
+    // The GPIO1 ladder is deliberately NOT armed: on real X4 units its idle level
+    // didn't match the reference values and a low-level wake on GPIO1 fired
+    // spuriously (the v3.2.0 reboot-loop).  LEFT/RIGHT are instead read while the
+    // sign is already awake (poll window), where the ADC is stable.
+    const gpio_num_t pwr = (gpio_num_t)BTN_POWER_PIN;   // GPIO3 (RTC-capable on C3)
+    // If the power button is still held, wait briefly for release first, so the
+    // LOW level we're about to arm doesn't immediately re-wake us (no held-button
+    // wake loop).  Times out after 5 s so a stuck button can't hang the device.
+    pinMode(BTN_POWER_PIN, INPUT_PULLUP);
+    uint32_t relStart = millis();
+    while (digitalRead(BTN_POWER_PIN) == LOW && (millis() - relStart) < 5000UL) {
+        delay(20);
+    }
+    esp_deep_sleep_enable_gpio_wakeup(1ULL << (uint32_t)pwr, ESP_GPIO_WAKEUP_GPIO_LOW);
+}
+
+// =============================================================================
+// detectPowerAwake() — Feature 10
+//
+// Resolve whether to STAY AWAKE (USB) or DEEP-SLEEP (battery) this wake.
+//   gPowerMode 1 (AWAKE) → always awake; 2 (SLEEP) → always sleep.
+//   gPowerMode 0 (AUTO)  → best effort: awake if a USB host has opened the CDC
+//     serial port, OR (battery monitor on) the rail reads >= USB_DETECT_MV
+//     (i.e. it's being charged).  Detection is best-effort on the X4; if wrong,
+//     the user sets POWER_MODE / the "power_mode" portal field to force it.
+// =============================================================================
+static bool detectPowerAwake()
+{
+    if (gPowerMode == 1) { Serial.println("[PWR]  Mode=AWAKE (forced)"); return true;  }
+    if (gPowerMode == 2) { Serial.println("[PWR]  Mode=SLEEP (forced)"); return false; }
+
+    // AUTO -------------------------------------------------------------------
+    if ((bool)Serial) {                         // a USB host has opened the CDC port
+        Serial.println("[PWR]  AUTO -> AWAKE (USB host detected)");
+        return true;
+    }
+#if ENABLE_BATTERY_MONITOR
+    uint32_t adcMv  = (uint32_t)analogReadMilliVolts(0);
+    uint32_t vbatMv = (uint32_t)((float)adcMv * VBAT_DIVIDER_RATIO);
+    Serial.printf("[PWR]  AUTO check: vbat=%lu mV (USB_DETECT_MV=%d)\n",
+                  (unsigned long)vbatMv, (int)USB_DETECT_MV);
+    if (vbatMv >= (uint32_t)USB_DETECT_MV) {
+        Serial.println("[PWR]  AUTO -> AWAKE (rail high → charging/USB)");
+        return true;
+    }
+    Serial.println("[PWR]  AUTO -> SLEEP (on battery)");
+    return false;
+#else
+    Serial.println("[PWR]  AUTO -> AWAKE (no battery sense; assuming USB)");
+    return true;
+#endif
+}
+
+// =============================================================================
+// stayAwakeAndPoll() — Feature 10 (AWAKE / USB mode)
+//
+// Instead of deep sleep, keep the CPU awake and poll EVERY button continuously so
+// they respond instantly (the GPIO1 ADC ladder can't wake from deep sleep, but is
+// perfectly readable while awake).  When the refresh interval elapses — or the
+// user presses a button — esp_restart() runs a clean, fully-tested fetch+render
+// cycle (the e-ink keeps its image across the restart, so there is no flicker).
+// Never returns.  NVS (prefs) is already closed by the caller before goToSleep().
+// =============================================================================
+static void stayAwakeAndPoll(int refreshMin)
+{
+    uint32_t windowMs = (uint32_t)((refreshMin > 0) ? refreshMin : 1) * 60UL * 1000UL;
+    uint32_t t0 = millis();
+    pinMode(BTN_POWER_PIN, INPUT_PULLUP);
+    Serial.printf("[AWAKE] USB/awake mode — polling buttons for %lu ms, then refreshing\n",
+                  (unsigned long)windowMs);
+
+    while ((millis() - t0) < windowMs) {
+        // LEFT / RIGHT → switch route (require a stable repeat read to reject noise)
+        ButtonId b = readButton();
+        if (b == BTN_LEFT || b == BTN_RIGHT) {
+            delay(60);
+            if (readButton() == b) {
+                manualStopOverride = (b == BTN_LEFT) ? 0 : 1;   // survives esp_restart()
+                uint32_t rel = millis();                        // wait for release (no re-trigger)
+                while (readButton() == b && (millis() - rel) < 4000UL) delay(20);
+                Serial.printf("[AWAKE] %s -> override=%d — restarting for fresh render\n",
+                              (b == BTN_LEFT) ? "LEFT" : "RIGHT", manualStopOverride);
+                Serial.flush(); delay(20);
+                esp_restart();
+            }
+        }
+        // POWER → refresh now
+        if (digitalRead(BTN_POWER_PIN) == LOW) {
+            delay(50);
+            if (digitalRead(BTN_POWER_PIN) == LOW) {
+                uint32_t rel = millis();
+                while (digitalRead(BTN_POWER_PIN) == LOW && (millis() - rel) < 4000UL) delay(20);
+                Serial.println("[AWAKE] POWER press -> refresh now (restart)");
+                Serial.flush(); delay(20);
+                esp_restart();
+            }
+        }
+        delay(40);   // poll pacing
+    }
+    Serial.println("[AWAKE] Refresh interval elapsed — restarting for a fresh cycle");
+    Serial.flush(); delay(20);
+    esp_restart();
 }
 
 // =============================================================================
@@ -514,6 +636,11 @@ static void goToSleep(int sleepMin = 0)
     if (sleepMin <= 0) {
         sleepMin = (gRefreshMin > 0) ? gRefreshMin : REFRESH_MINUTES;
     }
+    // Feature 10: AWAKE (USB) mode never deep-sleeps — stay awake, poll all
+    // buttons, and re-run a fresh cycle each interval.  (Never returns.)
+    if (gPowerAwake) {
+        stayAwakeAndPoll(sleepMin);
+    }
     uint64_t sleep_us = (uint64_t)sleepMin * 60ULL * 1000000ULL;
     Serial.printf("[SLEEP] Deep-sleeping for %d min (%llu us)\n",
                   sleepMin, (unsigned long long)sleep_us);
@@ -521,6 +648,42 @@ static void goToSleep(int sleepMin = 0)
     esp_sleep_enable_timer_wakeup(sleep_us);
     armButtonWakeup();   // Feature 8: ADD button wake alongside the timer wake
     esp_deep_sleep_start();
+}
+
+// =============================================================================
+// computeSleepMinutes() — v3.4.0
+//
+// Decide the next deep-sleep duration from the same rules used at the very end of
+// the wake cycle:
+//   • late-night window           → LATE_NIGHT_SLEEP_MIN
+//   • no upcoming service (fresh)  → NO_SERVICE_SLEEP_MIN
+//   • otherwise                    → gRefreshMin
+// Extracted so the footer can show the NEXT update time BEFORE we render, while
+// the actual goToSleep() at the end of setup() uses the very same value.
+// =============================================================================
+static int computeSleepMinutes(JsonArrayConst deps, time_t now_utc,
+                               int32_t utc_offset, bool stale)
+{
+    int sleepMinutes = (gRefreshMin > 0) ? gRefreshMin : REFRESH_MINUTES;
+    if (utc_offset != 0 && now_utc > 0) {
+        int64_t localEpoch = (int64_t)now_utc + (int64_t)utc_offset;
+        int localHour = (int)((localEpoch / 3600LL) % 24LL);
+        if (localHour < 0) localHour += 24;
+        bool isLateNight = (LATE_NIGHT_START_HOUR < LATE_NIGHT_END_HOUR)
+            ? (localHour >= LATE_NIGHT_START_HOUR && localHour < LATE_NIGHT_END_HOUR)
+            : (localHour >= LATE_NIGHT_START_HOUR || localHour < LATE_NIGHT_END_HOUR);
+        if (isLateNight) {
+            sleepMinutes = LATE_NIGHT_SLEEP_MIN;
+        } else {
+            int upcomingCount = 0;
+            for (JsonObjectConst dep : deps) {
+                time_t depTime = (time_t)dep["time"].as<long long>();
+                if ((int64_t)depTime >= (int64_t)now_utc - 60LL) upcomingCount++;
+            }
+            if (upcomingCount == 0 && !stale) sleepMinutes = NO_SERVICE_SLEEP_MIN;
+        }
+    }
+    return sleepMinutes;
 }
 
 // =============================================================================
@@ -922,24 +1085,44 @@ void setup()
     analogSetAttenuation(ADC_11db);             // full 0–3.3 V span (chip-wide; default is already 11db)
 
     esp_sleep_wakeup_cause_t wakeCause = esp_sleep_get_wakeup_cause();
-    bool gpioWake = (wakeCause == ESP_SLEEP_WAKEUP_GPIO);
-    Serial.printf("[BTN] wake cause=%d  gpioWake=%d  (gpio status=0x%llx)\n",
-                  (int)wakeCause, (int)gpioWake,
-                  (unsigned long long)esp_sleep_get_gpio_wakeup_status());
+    bool     gpioWake   = (wakeCause == ESP_SLEEP_WAKEUP_GPIO);
+    uint64_t gpioStatus = esp_sleep_get_gpio_wakeup_status();
+    // v3.4.0: only the POWER button (GPIO3) is armed as a wake source.  A GPIO
+    // wake therefore means the user pressed POWER → wake + refresh, and we open
+    // the short LEFT/RIGHT poll window below (§17b).  The GPIO1 ADC ladder is NOT
+    // armed (it caused spurious wakes), so ladderWake stays false unless a future
+    // build re-arms it after on-unit ADC calibration.
+    bool powerWake  = gpioWake && ((gpioStatus & (1ULL << BTN_POWER_PIN))    != 0);
+    bool ladderWake = gpioWake && ((gpioStatus & (1ULL << BTN_ADC_LEFT_PIN)) != 0);
+    Serial.printf("[BTN] wake cause=%d gpioWake=%d powerWake=%d ladderWake=%d (gpio status=0x%llx)\n",
+                  (int)wakeCause, (int)gpioWake, (int)powerWake, (int)ladderWake,
+                  (unsigned long long)gpioStatus);
+
+    // Reset the LEFT/RIGHT poll anti-loop guard on a normal TIMER wake (the device
+    // slept and woke on schedule, not via our own esp_restart) — so the guard only
+    // ever accumulates within a single burst of button activity.
+    if (wakeCause == ESP_SLEEP_WAKEUP_TIMER) btnRestartCount = 0;
 
     // Always sample + print on boot so the user can calibrate by watching serial.
     ButtonId bootBtn = readButton();
 
-    // Only adopt the press as an override when it actually woke us AND reads as
-    // LEFT/RIGHT.  (A POWER-button wake reads as none → no override → normal
-    // time-of-day stop with a fresh fetch, which is a fine "refresh now" action.)
-    if (gpioWake && bootBtn == BTN_LEFT) {
+    // Adopt a LEFT/RIGHT press as a stop override ONLY when the LADDER pin woke us
+    // (never on a POWER wake, whose ADC read could phantom).  With the ladder wake
+    // disarmed this is inert today; LEFT/RIGHT switching is done by the post-power
+    // poll (§17b).  Kept so re-arming GPIO1 later "just works".
+    if (ladderWake && bootBtn == BTN_LEFT) {
         manualStopOverride = 0;   // HOME / morning stop
-        Serial.println("[BTN] Boot wake = LEFT  -> manualStopOverride=0 (HOME)");
-    } else if (gpioWake && bootBtn == BTN_RIGHT) {
+        Serial.println("[BTN] Boot ladder wake = LEFT  -> manualStopOverride=0 (HOME)");
+    } else if (ladderWake && bootBtn == BTN_RIGHT) {
         manualStopOverride = 1;   // CITY / return stop
-        Serial.println("[BTN] Boot wake = RIGHT -> manualStopOverride=1 (CITY)");
+        Serial.println("[BTN] Boot ladder wake = RIGHT -> manualStopOverride=1 (CITY)");
     }
+
+    // ---- 1d. Resolve power mode (Feature 10) -------------------------------
+    // Decide NOW whether we STAY AWAKE (USB) or DEEP-SLEEP (battery) this cycle.
+    gPowerAwake = detectPowerAwake();
+    Serial.printf("[PWR]  This wake: %s\n",
+                  gPowerAwake ? "STAY AWAKE (USB)" : "DEEP-SLEEP (battery)");
 
     // ---- 2. SPI bus init ---------------------------------------------------
     SPI.begin(EPD_SCK, EPD_MISO, EPD_MOSI, /*ss=*/-1);
@@ -1043,8 +1226,15 @@ void setup()
             addWifiNetwork(prefs, WiFi.SSID(), WiFi.psk());
 
         } else {
-            bool noSavedCreds   = (WiFi.SSID().length() == 0);
-            bool shouldOpenPortal = noSavedCreds || (wifiFailCount >= WIFI_PORTAL_AFTER_FAILS);
+            // v3.4.0: a configured sign must NOT re-open the portal on a transient
+            // drop.  "Have creds" if esp_wifi has a stored SSID OR we have any
+            // remembered network in NVS — so only a first-ever setup (no creds at
+            // all) opens the portal immediately.  Thereafter it re-opens only after
+            // WIFI_PORTAL_AFTER_FAILS (30) CONSECUTIVE failed wakes (~1 h), i.e. the
+            // network is genuinely gone or the password actually changed.
+            int  rememberedCount  = prefs.getInt("wnet_cnt", 0);
+            bool haveCreds        = (WiFi.SSID().length() > 0) || (rememberedCount > 0);
+            bool shouldOpenPortal = (!haveCreds) || (wifiFailCount >= WIFI_PORTAL_AFTER_FAILS);
 
             if (shouldOpenPortal) {
                 Serial.printf("[WIFI] Opening config portal — AP: \"%s\", timeout: %d s\n",
@@ -1093,6 +1283,8 @@ void setup()
                 snprintf(curRotationStr, sizeof(curRotationStr), "%d", gRotation);
                 char curSwitchHStr[3];
                 snprintf(curSwitchHStr, sizeof(curSwitchHStr), "%d", gStopSwitchHour);
+                char curPowerModeStr[2];
+                snprintf(curPowerModeStr, sizeof(curPowerModeStr), "%d", gPowerMode);
 
                 WiFiManagerParameter paramUrl(
                     "data_url", "Data URL (https://...)", gDataUrl.c_str(), 200);
@@ -1104,11 +1296,16 @@ void setup()
                     "stop_switch_h",
                     "Stop switch hour 0-23 (< = home, >= = city)",
                     curSwitchHStr, 3);
+                WiFiManagerParameter paramPowerMode(
+                    "power_mode",
+                    "Power: 0=auto, 1=always-on (USB), 2=battery sleep",
+                    curPowerModeStr, 2);
 
                 wm.addParameter(&paramUrl);
                 wm.addParameter(&paramRefresh);
                 wm.addParameter(&paramRotation);
                 wm.addParameter(&paramStopSwitch);
+                wm.addParameter(&paramPowerMode);
 
                 g_pSetupDisplay = &display;
 
@@ -1132,7 +1329,8 @@ void setup()
                                        paramUrl.getValue(),
                                        paramRefresh.getValue(),
                                        paramRotation.getValue(),
-                                       paramStopSwitch.getValue());
+                                       paramStopSwitch.getValue(),
+                                       paramPowerMode.getValue());
 
                     // Remember the freshly-configured network (v3.1, Feature A)
                     // so future wakes auto-join it via WiFiMulti.
@@ -1204,6 +1402,13 @@ void setup()
         Serial.println("[NTP]  Sync failed — countdowns will show \"?\"");
         now_utc = 0;
     }
+
+    // v3.4.0: next-update time for the no-data / error screens (which sleep the
+    // default refresh interval).  The main board uses the precise nextUpdateEpoch
+    // computed in §16b; this is the fallback used by the early-exit screens.
+    time_t nextDefaultEpoch = (now_utc > 0)
+        ? (now_utc + (time_t)((gRefreshMin > 0) ? gRefreshMin : REFRESH_MINUTES) * 60)
+        : 0;
 
     // ---- 6. HTTPS GET departures.json --------------------------------------
     char url[256];
@@ -1280,6 +1485,10 @@ void setup()
             delay(800);
         }
     }
+    // v3.4.0 (Feature 9): capture the connected SSID BEFORE disconnecting, so the
+    // location-lock rule (§12) can pin the morning stop when on the home network.
+    String connectedSsid = WiFi.SSID();
+    Serial.printf("[WIFI] Connected SSID for location-lock check: \"%s\"\n", connectedSsid.c_str());
     WiFi.disconnect(true);
 
     // ---- 7. Parse JSON (Contract v3) ---------------------------------------
@@ -1367,7 +1576,7 @@ void setup()
                 // v3.3.0 (Feature A): pass now_utc so the no-data screen shows the
                 // live "Updated H:MMam" line (offset defaults to AEST; utc_offset
                 // from JSON is not available on this error path).
-                drawNoDataScreen(display, now_utc);
+                drawNoDataScreen(display, now_utc, 36000, nextDefaultEpoch);
                 prefs.end();
                 goToSleep();
                 return;
@@ -1377,7 +1586,7 @@ void setup()
             Serial.println("[NVS]  Rendering with STALE cached data");
         } else {
             Serial.println("[NVS]  No cached data — rendering no-data screen");
-            drawNoDataScreen(display, now_utc);   // v3.3.0: live "Updated H:MMam" line
+            drawNoDataScreen(display, now_utc, 36000, nextDefaultEpoch);   // v3.3.0: live "Updated H:MMam" line
             prefs.end();
             goToSleep();
             return;
@@ -1464,6 +1673,15 @@ void setup()
                       targetStopId,
                       (manualStopOverride == 0) ? "HOME/LEFT" : "CITY/RIGHT");
         manualStopOverride = -1;   // one-shot: next scheduled wake is normal again
+#if LOCATION_LOCK_ENABLE
+    } else if (connectedSsid == LOCATION_LOCK_SSID) {
+        // Feature 9 (v3.4.0): on the home Wi-Fi, FORCE the configured stop,
+        // overriding the time-of-day switch.  (A LEFT/RIGHT button press above
+        // still wins for that one wake so you can peek the other route.)
+        targetStopId = LOCATION_LOCK_TO_CITY ? CITY_STOP_ID : HOME_STOP_ID;
+        Serial.printf("[STOP] location lock (SSID \"%s\") -> %s\n",
+                      connectedSsid.c_str(), targetStopId);
+#endif
     } else if (now_utc > 0) {
         int64_t localEpoch = (int64_t)now_utc + (int64_t)utc_offset;
         int localHour = (int)((localEpoch / 3600LL) % 24LL);
@@ -1499,7 +1717,7 @@ void setup()
     } else if (!found) {
         // Empty stops array — render no-data
         Serial.println("[STOP] No stops in JSON — rendering no-data screen");
-        drawNoDataScreen(display, now_utc, utc_offset);   // v3.3.0: live "Updated H:MMam" line
+        drawNoDataScreen(display, now_utc, utc_offset, nextDefaultEpoch);   // v3.3.0: live "Updated H:MMam" line
         prefs.end();
         goToSleep();
         return;
@@ -1607,7 +1825,7 @@ void setup()
                 if (cachedJson.length() == 0) {
                     // No cache available — cannot render anything safe.
                     Serial.println("[OTA]  No cached JSON after OTA failure — no-data screen");
-                    drawNoDataScreen(display, now_utc, utc_offset);   // v3.3.0: live "Updated H:MMam"
+                    drawNoDataScreen(display, now_utc, utc_offset, nextDefaultEpoch);   // v3.3.0: live "Updated H:MMam"
                     prefs.end();
                     goToSleep();
                     return;
@@ -1618,7 +1836,7 @@ void setup()
                     !doc["stops"].is<JsonArray>() || !doc["alerts"].is<JsonArray>()) {
                     Serial.printf("[OTA]  Cache re-parse failed: %s — no-data screen\n",
                                   reParseErr ? reParseErr.c_str() : "missing v3 fields");
-                    drawNoDataScreen(display, now_utc, utc_offset);   // v3.3.0: live "Updated H:MMam"
+                    drawNoDataScreen(display, now_utc, utc_offset, nextDefaultEpoch);   // v3.3.0: live "Updated H:MMam"
                     prefs.end();
                     goToSleep();
                     return;
@@ -1645,7 +1863,7 @@ void setup()
                     selectedDeps      = first["departures"].as<JsonArray>();
                 } else if (!found) {
                     Serial.println("[OTA]  Cache re-parse: no stops — no-data screen");
-                    drawNoDataScreen(display, now_utc, utc_offset);   // v3.3.0: live "Updated H:MMam"
+                    drawNoDataScreen(display, now_utc, utc_offset, nextDefaultEpoch);   // v3.3.0: live "Updated H:MMam"
                     prefs.end();
                     goToSleep();
                     return;
@@ -1700,6 +1918,14 @@ void setup()
         Serial.printf("[EPD]  Partial refresh eligible (counter=%d)\n", fullRefreshCounter);
     }
 
+    // ---- 16b. Compute next-update time (v3.4.0) ---------------------------
+    // Decide the next sleep duration NOW (same rules as §18) so the footer can
+    // show "Next update H:MM".  §18 reuses this exact value for the actual sleep.
+    int    sleepMinutes    = computeSleepMinutes(selectedDeps, now_utc, utc_offset, stale);
+    time_t nextUpdateEpoch = (now_utc > 0) ? (now_utc + (time_t)sleepMinutes * 60) : 0;
+    Serial.printf("[SLEEP] Next update in %d min (epoch %lld)\n",
+                  sleepMinutes, (long long)nextUpdateEpoch);
+
     // ---- 17. Render (or skip) departure board ------------------------------
     if (!contentChanged) {
         Serial.println("[EPD]  Content unchanged (hash match) — skipping redraw");
@@ -1715,7 +1941,8 @@ void setup()
                   batteryPct,
                   utc_offset,
                   forceFullRefresh,
-                  /*skipRedraw=*/true);
+                  /*skipRedraw=*/true,
+                  nextUpdateEpoch);
     } else {
         Serial.println("[EPD]  Rendering board...");
         drawBoard(display,
@@ -1728,7 +1955,8 @@ void setup()
                   batteryPct,
                   utc_offset,
                   forceFullRefresh,
-                  /*skipRedraw=*/false);
+                  /*skipRedraw=*/false,
+                  nextUpdateEpoch);
         Serial.println("[EPD]  Board rendered");
 
         // Mark panel as ever-painted (FIX 1: sentinel for first-boot detection)
@@ -1768,20 +1996,28 @@ void setup()
     // don't want an immediate restart loop.  We also only act when the press
     // selects a DIFFERENT stop than the one just rendered.
 #if BUTTON_HOLD_OVERRIDE > 0
-    if (!gpioWake) {
-        Serial.printf("[BTN] Live poll for %d ms (press LEFT/RIGHT to switch stop)\n",
+    // v3.4.0: run the LEFT/RIGHT poll ONLY after a POWER-button wake (a deliberate
+    // press) — never after a plain timer wake (saves battery) and never after our
+    // own esp_restart (a SW reset has powerWake=false), so the poll cannot
+    // free-run.  readButton() is multi-sampled AND we require a repeated stable
+    // read; an RTC guard (btnRestartCount) caps restarts.  Together these make the
+    // v3.2.0 phantom-press reboot loop impossible to recur.
+    if (powerWake && btnRestartCount < BTN_RESTART_GUARD_MAX) {
+        Serial.printf("[BTN] Power wake — polling %d ms for LEFT/RIGHT stop switch\n",
                       (int)BUTTON_HOLD_OVERRIDE);
         uint32_t pollStart = millis();
         while (millis() - pollStart < (uint32_t)BUTTON_HOLD_OVERRIDE) {
             ButtonId b = readButton();
-            int wantOverride = (b == BTN_LEFT)  ? 0
-                             : (b == BTN_RIGHT) ? 1 : -1;
-            if (wantOverride >= 0) {
+            if (b == BTN_LEFT || b == BTN_RIGHT) {
+                delay(60);
+                if (readButton() != b) { delay(40); continue; }   // require a stable repeat
+                int wantOverride = (b == BTN_LEFT) ? 0 : 1;
                 const char* wantStopId = (wantOverride == 0) ? HOME_STOP_ID : CITY_STOP_ID;
                 // Only switch if it differs from what is already shown.
                 if (!selectedStopId || strcmp(selectedStopId, wantStopId) != 0) {
                     manualStopOverride = wantOverride;   // survives esp_restart()
-                    Serial.printf("[BTN] Live press -> override=%d (%s) — restarting for fresh fetch\n",
+                    btnRestartCount++;                   // anti-loop guard (reset on timer wake)
+                    Serial.printf("[BTN] Stable press -> override=%d (%s) — restarting for fresh fetch\n",
                                   wantOverride, wantStopId);
                     prefs.end();
                     Serial.flush();
@@ -1791,55 +2027,16 @@ void setup()
             }
             delay(40);   // light debounce / poll pacing
         }
-        Serial.println("[BTN] Live poll window closed — no stop switch");
+        Serial.println("[BTN] Poll window closed — no stop switch");
     }
 #endif // BUTTON_HOLD_OVERRIDE
 
-    // ---- 18. Smart sleep decision ------------------------------------------
-    int sleepMinutes = gRefreshMin;  // default
-
-    if (utc_offset != 0 && now_utc > 0) {
-        int64_t localEpoch = (int64_t)now_utc + (int64_t)utc_offset;
-        int localHour = (int)((localEpoch / 3600LL) % 24LL);
-        if (localHour < 0) localHour += 24;
-
-        Serial.printf("[SLEEP] Local hour: %d  (utc_offset=%d)\n", localHour, (int)utc_offset);
-
-        bool isLateNight = (LATE_NIGHT_START_HOUR < LATE_NIGHT_END_HOUR)
-            ? (localHour >= LATE_NIGHT_START_HOUR && localHour < LATE_NIGHT_END_HOUR)
-            : (localHour >= LATE_NIGHT_START_HOUR || localHour < LATE_NIGHT_END_HOUR);
-
-        if (isLateNight) {
-            sleepMinutes = LATE_NIGHT_SLEEP_MIN;
-            Serial.printf("[SLEEP] Late-night window — sleeping %d min\n", sleepMinutes);
-        } else {
-            // Count upcoming departures from the selected stop
-            int upcomingCount = 0;
-            for (JsonObjectConst dep : selectedDeps) {
-                time_t depTime = (time_t)dep["time"].as<long long>();
-                if ((int64_t)depTime >= (int64_t)now_utc - 60LL) {
-                    upcomingCount++;
-                }
-            }
-            Serial.printf("[SLEEP] Upcoming departures: %d\n", upcomingCount);
-
-            // FIX 5: only apply no-service long sleep on fresh (non-stale) data.
-            // When stale, an empty board is an artifact of the stale cache, not
-            // reality — applying NO_SERVICE_SLEEP_MIN would delay reconnection by
-            // up to 20 min.  On stale data we sleep the normal gRefreshMin to retry soon.
-            if (upcomingCount == 0 && !stale) {
-                sleepMinutes = NO_SERVICE_SLEEP_MIN;
-                Serial.printf("[SLEEP] No service — sleeping %d min\n", sleepMinutes);
-            } else {
-                Serial.printf("[SLEEP] Normal interval — sleeping %d min\n", sleepMinutes);
-            }
-        }
-    } else {
-        Serial.printf("[SLEEP] utc_offset unknown or NTP failed — sleeping %d min\n",
-                      sleepMinutes);
-    }
-
-    // ---- 19. Deep sleep ----------------------------------------------------
+    // ---- 18. Deep sleep ----------------------------------------------------
+    // sleepMinutes + nextUpdateEpoch were computed in §16b (so the footer could
+    // show the next-update time); reuse the SAME value for the actual sleep so the
+    // footer's "Next update H:MM" and the real wake time always agree.
+    Serial.printf("[SLEEP] Sleeping %d min (next update at the time shown in the footer)\n",
+                  sleepMinutes);
     prefs.end();
     goToSleep(sleepMinutes);
 }

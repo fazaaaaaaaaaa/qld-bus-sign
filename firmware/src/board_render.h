@@ -521,7 +521,8 @@ void drawBoard(GxEPD2_Type&        display,
                int                 batteryPct       = -1,
                int32_t             utc_offset_seconds = 36000,
                bool                forceFullRefresh = true,
-               bool                skipRedraw       = false)
+               bool                skipRedraw       = false,
+               time_t              next_update_utc  = 0)
 {
     // ---- Short-circuit if nothing changed (Feature 1a) -----------------------
     if (skipRedraw) {
@@ -603,15 +604,21 @@ void drawBoard(GxEPD2_Type&        display,
     // sits INSIDE the partial-refresh window (y >= COLHDR_BOT), so it refreshes
     // on partial updates too — not just on full refreshes.
     // NTP-failed fallback (now_utc == 0): show "Updated --:--".
-    char liveUpdatedBuf[24];   // "Updated 12:59pm" worst case = 15 chars
-    if (now_utc > 0) {
-        char liveTimeBuf[12];  // "12:59pm"
-        formatLocalTime12hCompact(now_utc, utc_offset_seconds, /*shortSuffix=*/false,
-                                  liveTimeBuf, sizeof(liveTimeBuf));
-        snprintf(liveUpdatedBuf, sizeof(liveUpdatedBuf), "Updated %s", liveTimeBuf);
-    } else {
-        strncpy(liveUpdatedBuf, "Updated --:--", sizeof(liveUpdatedBuf));
-        liveUpdatedBuf[sizeof(liveUpdatedBuf)-1] = '\0';
+    char liveUpdatedBuf[28];   // "Next update 12:59pm" worst case = 19 chars
+    {
+        char timeBuf[12];  // "12:59pm"
+        if (next_update_utc > 0) {
+            formatLocalTime12hCompact(next_update_utc, utc_offset_seconds, /*shortSuffix=*/false,
+                                      timeBuf, sizeof(timeBuf));
+            snprintf(liveUpdatedBuf, sizeof(liveUpdatedBuf), "Next update %s", timeBuf);
+        } else if (now_utc > 0) {
+            formatLocalTime12hCompact(now_utc, utc_offset_seconds, /*shortSuffix=*/false,
+                                      timeBuf, sizeof(timeBuf));
+            snprintf(liveUpdatedBuf, sizeof(liveUpdatedBuf), "Updated %s", timeBuf);
+        } else {
+            strncpy(liveUpdatedBuf, "Next update --:--", sizeof(liveUpdatedBuf));
+            liveUpdatedBuf[sizeof(liveUpdatedBuf)-1] = '\0';
+        }
     }
 
     // ---- Pre-build per-row data (ETA, done before paged loop) ----------------
@@ -1171,18 +1178,25 @@ void drawSetupScreen(GxEPD2_Type& display, const char* apName, const char* ip)
 template <typename GxEPD2_Type>
 void drawNoDataScreen(GxEPD2_Type& display,
                       time_t  now_utc            = 0,
-                      int32_t utc_offset_seconds = 36000)
+                      int32_t utc_offset_seconds = 36000,
+                      time_t  next_update_utc    = 0)
 {
     // Live "Updated H:MMam" string (current local time; ticks each wake).
-    char liveUpdatedBuf[24];
-    if (now_utc > 0) {
-        char liveTimeBuf[12];
-        formatLocalTime12hCompact(now_utc, utc_offset_seconds, /*shortSuffix=*/false,
-                                  liveTimeBuf, sizeof(liveTimeBuf));
-        snprintf(liveUpdatedBuf, sizeof(liveUpdatedBuf), "Updated %s", liveTimeBuf);
-    } else {
-        strncpy(liveUpdatedBuf, "Updated --:--", sizeof(liveUpdatedBuf));
-        liveUpdatedBuf[sizeof(liveUpdatedBuf)-1] = '\0';
+    char liveUpdatedBuf[28];
+    {
+        char timeBuf[12];
+        if (next_update_utc > 0) {
+            formatLocalTime12hCompact(next_update_utc, utc_offset_seconds, /*shortSuffix=*/false,
+                                      timeBuf, sizeof(timeBuf));
+            snprintf(liveUpdatedBuf, sizeof(liveUpdatedBuf), "Next update %s", timeBuf);
+        } else if (now_utc > 0) {
+            formatLocalTime12hCompact(now_utc, utc_offset_seconds, /*shortSuffix=*/false,
+                                      timeBuf, sizeof(timeBuf));
+            snprintf(liveUpdatedBuf, sizeof(liveUpdatedBuf), "Updated %s", timeBuf);
+        } else {
+            strncpy(liveUpdatedBuf, "Next update --:--", sizeof(liveUpdatedBuf));
+            liveUpdatedBuf[sizeof(liveUpdatedBuf)-1] = '\0';
+        }
     }
 
     display.setFullWindow();
