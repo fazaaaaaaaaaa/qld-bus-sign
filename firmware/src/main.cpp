@@ -1042,7 +1042,7 @@ void setup()
 #if SHOW_ALERTS
     {
         int alertCount = 0;
-        for (JsonObjectConst a : alertsArr.as<JsonArrayConst>()) {
+        for (JsonObjectConst a : alertsArr) {
             (void)a;
             alertCount++;
         }
@@ -1053,8 +1053,8 @@ void setup()
     // ---- 14. Content hash — Feature 1a (change-skip) ----------------------
     uint32_t newHash = computeContentHash(
         selectedStopId,
-        selectedDeps.as<JsonArrayConst>(),
-        alertsArr.as<JsonArrayConst>(),
+        selectedDeps,
+        alertsArr,
         now_utc,
         hasAlerts,
         stale,
@@ -1176,8 +1176,8 @@ void setup()
                 // Re-hash with restored data
                 newHash = computeContentHash(
                     selectedStopId,
-                    selectedDeps.as<JsonArrayConst>(),
-                    alertsArr.as<JsonArrayConst>(),
+                    selectedDeps,
+                    alertsArr,
                     now_utc, hasAlerts, stale, batteryPct);
                 contentChanged = (newHash != lastHash);
             }
@@ -1228,9 +1228,9 @@ void setup()
         // counter intentionally NOT incremented (M6: unchanged wakes don't count)
         // Call drawBoard with skipRedraw=true so it just hibernates the panel.
         drawBoard(display,
-                  selectedDeps.as<JsonArrayConst>(),
+                  selectedDeps,
                   selectedStopLabel,
-                  alertsArr.as<JsonArrayConst>(),
+                  alertsArr,
                   now_utc,
                   stale,
                   fetchEpoch,
@@ -1241,9 +1241,9 @@ void setup()
     } else {
         Serial.println("[EPD]  Rendering board...");
         drawBoard(display,
-                  selectedDeps.as<JsonArrayConst>(),
+                  selectedDeps,
                   selectedStopLabel,
-                  alertsArr.as<JsonArrayConst>(),
+                  alertsArr,
                   now_utc,
                   stale,
                   fetchEpoch,
@@ -1290,7 +1290,7 @@ void setup()
         } else {
             // Count upcoming departures from the selected stop
             int upcomingCount = 0;
-            for (JsonObjectConst dep : selectedDeps.as<JsonArrayConst>()) {
+            for (JsonObjectConst dep : selectedDeps) {
                 time_t depTime = (time_t)dep["time"].as<long long>();
                 if ((int64_t)depTime >= (int64_t)now_utc - 60LL) {
                     upcomingCount++;
