@@ -175,6 +175,15 @@ static void loadRuntimeSettings(Preferences& prefs)
     if (gDataUrl.length() == 0)                    gDataUrl        = DATA_URL;
     if (gStopSwitchHour < 0 || gStopSwitchHour > 23) gStopSwitchHour = STOP_SWITCH_HOUR;
 
+    // v3.2.2: one-time migration of existing devices off the old GitHub Pages
+    // feed onto the new default (Cloudflare Worker) so reliable refresh kicks in
+    // without re-running the setup portal.  Only rewrites the exact old URL.
+    if (gDataUrl == "https://fazaaaaaaaaaa.github.io/qld-bus-sign/departures.json") {
+        gDataUrl = DATA_URL;
+        prefs.putString("data_url", gDataUrl);
+        Serial.println("[NVS]  data_url migrated to new default (Cloudflare Worker)");
+    }
+
     Serial.printf("[NVS]  data_url=%s  refresh=%d min  rotation=%d  stop_switch_h=%d\n",
                   gDataUrl.c_str(), gRefreshMin, gRotation, gStopSwitchHour);
 }
