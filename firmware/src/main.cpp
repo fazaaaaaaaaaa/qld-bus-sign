@@ -429,13 +429,7 @@ static bool performOTA(const char* bin_url, const char* expected_sha256)
     // ---- Stream download + SHA-256 in one pass --------------------------------
     mbedtls_sha256_context sha_ctx;
     mbedtls_sha256_init(&sha_ctx);
-    if (mbedtls_sha256_starts(&sha_ctx, 0) != 0) {  // 0 = SHA-256
-        Serial.println("[OTA]  mbedtls_sha256_starts() failed — aborting");
-        Update.abort();
-        mbedtls_sha256_free(&sha_ctx);
-        otaHttp.end();
-        return false;
-    }
+    mbedtls_sha256_starts(&sha_ctx, 0);  // 0 = SHA-256 (returns void on this mbedTLS build)
 
     WiFiClient* stream = otaHttp.getStreamPtr();
     if (!stream) {
@@ -480,12 +474,8 @@ static bool performOTA(const char* bin_url, const char* expected_sha256)
             continue;
         }
 
-        // Feed to SHA-256
-        if (mbedtls_sha256_update(&sha_ctx, otaBuf, (size_t)bytesRead) != 0) {
-            Serial.println("[OTA]  mbedtls_sha256_update() failed — aborting");
-            streamError = true;
-            break;
-        }
+        // Feed to SHA-256 (returns void on this mbedTLS build)
+        mbedtls_sha256_update(&sha_ctx, otaBuf, (size_t)bytesRead);
 
         // Feed to Update (OTA partition writer)
         size_t written = Update.write(otaBuf, (size_t)bytesRead);
@@ -510,12 +500,7 @@ static bool performOTA(const char* bin_url, const char* expected_sha256)
 
     // ---- Verify SHA-256 BEFORE committing ------------------------------------
     uint8_t digest[32];
-    if (mbedtls_sha256_finish(&sha_ctx, digest) != 0) {
-        Serial.println("[OTA]  mbedtls_sha256_finish() failed — aborting");
-        Update.abort();
-        mbedtls_sha256_free(&sha_ctx);
-        return false;
-    }
+    mbedtls_sha256_finish(&sha_ctx, digest);  // returns void on this mbedTLS build
     mbedtls_sha256_free(&sha_ctx);
 
     // Convert digest to lowercase hex
