@@ -239,7 +239,7 @@
 // switches the view (not just a press that wakes the device from deep sleep).
 // A short poll keeps wake time (and battery use) low.  Set to 0 to disable the
 // post-render poll entirely (button still works as a deep-sleep wake source).
-#define BUTTON_HOLD_OVERRIDE  1500   // ms to watch for a live button press after render
+#define BUTTON_HOLD_OVERRIDE  0      // v3.2.1: DISABLED (0) — the post-render restart-poll caused phantom-press reboot loops on real hardware; re-enable only after on-device ADC calibration
 
 // -----------------------------------------------------------------------------
 // Battery monitor (optional)
@@ -389,7 +389,7 @@
 //   Set conservatively: an OTA that loses power mid-flash is recoverable
 //   (ESP32 has rollback support) but wastes time.  40% is a safe default.
 // -----------------------------------------------------------------------------
-#define FW_VERSION        "3.2.0"   // THIS build's version (compare vs JSON firmware.version)
+#define FW_VERSION        "3.2.1"   // THIS build's version (compare vs JSON firmware.version)
 #define ENABLE_OTA        1          // 1 = allow OTA from JSON firmware block; 0 = disabled
 #define OTA_MIN_BATT_PCT  40         // minimum battery % to start OTA (ignored if monitor off)
 
