@@ -50,7 +50,13 @@
 // -----------------------------------------------------------------------------
 #define WIFI_PORTAL_AP_NAME     "QLD-Bus-Sign-Setup"
 #define WIFI_PORTAL_TIMEOUT_S   300
-#define WIFI_PORTAL_AFTER_FAILS 3
+// v3.4.0: raised 3 → 30.  Once the sign has saved Wi-Fi credentials it NEVER
+// re-opens the setup portal on a transient drop — it just retries silently on
+// the next wake (showing a brief "Reconnecting" note).  The portal only re-opens
+// after this many CONSECUTIVE failed wakes (~1 hour at REFRESH_MINUTES=2), which
+// realistically only happens if the network is gone for good or the password
+// actually changed — i.e. a real "please re-set me up" situation.
+#define WIFI_PORTAL_AFTER_FAILS 30
 
 // -----------------------------------------------------------------------------
 // Multi-network Wi-Fi memory (v3.1)
@@ -239,7 +245,15 @@
 // switches the view (not just a press that wakes the device from deep sleep).
 // A short poll keeps wake time (and battery use) low.  Set to 0 to disable the
 // post-render poll entirely (button still works as a deep-sleep wake source).
-#define BUTTON_HOLD_OVERRIDE  0      // v3.2.1: DISABLED (0) — the post-render restart-poll caused phantom-press reboot loops on real hardware; re-enable only after on-device ADC calibration
+#define BUTTON_HOLD_OVERRIDE  8000   // v3.4.0: RE-ENABLED (ms) but ONLY runs after a POWER-button
+                                     // wake (a deliberate press), never after a plain timer wake —
+                                     // so it costs no battery on the normal schedule and cannot
+                                     // free-run.  readButton() is multi-sampled and an anti-loop
+                                     // RTC guard (BTN_RESTART_GUARD_MAX) caps button restarts, so
+                                     // the old phantom-press reboot loop cannot recur even if the
+                                     // ADC thresholds are slightly off on a given unit.
+#define BTN_RESTART_GUARD_MAX 2      // max consecutive button-triggered restarts before the poll is
+                                     // ignored for the rest of that awake window (anti-loop safety)
 
 // -----------------------------------------------------------------------------
 // Battery monitor (optional)
@@ -293,6 +307,33 @@
 #define LATE_NIGHT_SLEEP_MIN    60    // sleep duration during late-night window (minutes)
 #define NO_SERVICE_SLEEP_MIN    5     // sleep duration when zero upcoming departures (minutes) — keeps it lively + picks up first service fast
 
+// -----------------------------------------------------------------------------
+// FEATURE 10 — Power mode: stay awake on USB, deep-sleep on battery (v3.4)
+//
+// POWER_MODE selects how the sign behaves BETWEEN refreshes:
+//   0 = AUTO  — best-effort: STAY AWAKE when the sign looks USB-powered (a USB
+//               host has opened the serial port, OR the battery rail reads above
+//               USB_DETECT_MV i.e. it's being charged); otherwise DEEP-SLEEP to
+//               save the battery.
+//   1 = AWAKE — always stay awake (best when permanently plugged in): EVERY
+//               button (incl. LEFT/RIGHT) responds instantly and the board
+//               re-fetches every refresh interval.  Never sleeps — not for battery.
+//   2 = SLEEP — always deep-sleep between refreshes (max battery life; only the
+//               POWER button wakes it; ~REFRESH_MINUTES latency).
+//
+// This is also exposed in the WiFiManager portal as "power_mode" (NVS), so it can
+// be changed without reflashing.  NOTE: reliable USB-vs-battery detection isn't
+// possible on the X4 (no USB-sense pin; battery divider needs calibration), so
+// AUTO is a best effort — if it guesses wrong, set 1 (AWAKE) or 2 (SLEEP).
+//
+// In AWAKE mode the sign re-runs a full fetch+render every refresh interval via a
+// clean restart (the e-ink keeps its image in between, so there is no flicker).
+// The LEFT/RIGHT/POWER buttons are polled continuously while awake, so they are
+// instant and need no deep-sleep wake (which the GPIO1 ladder can't do reliably).
+// -----------------------------------------------------------------------------
+#define POWER_MODE     0      // 0=AUTO, 1=AWAKE (USB), 2=SLEEP (battery)
+#define USB_DETECT_MV  4250   // battery-rail mV at/above which AUTO assumes USB/charging
+
 // =============================================================================
 // ===  v3 CONTRACT ADDITIONS  =================================================
 // =============================================================================
@@ -311,6 +352,26 @@
 #define HOME_STOP_ID        "011180"   // morning stop (at home)
 #define CITY_STOP_ID        "24"       // afternoon stop (in city)
 #define STOP_SWITCH_HOUR    14         // local hour 0–23; < this → HOME, >= this → CITY
+
+// -----------------------------------------------------------------------------
+// FEATURE 9 — Location lock by Wi-Fi SSID (v3.4)
+//
+// When the sign is connected to LOCATION_LOCK_SSID, it FORCES the configured
+// stop regardless of the time-of-day STOP_SWITCH_HOUR rule.  Use this to pin the
+// morning / home board whenever the sign is on your home network — handy because
+// at home you almost always want the OUTBOUND (morning) departures.
+//
+//   LOCATION_LOCK_ENABLE 1 — enable the rule (0 disables it entirely).
+//   LOCATION_LOCK_SSID     — exact SSID (CASE-SENSITIVE) that triggers the lock.
+//   LOCATION_LOCK_TO_CITY  — 0 → lock to HOME_STOP_ID (Bonney Ave, morning);
+//                            1 → lock to CITY_STOP_ID  (Adelaide St, return).
+//
+// A physical LEFT/RIGHT button press still TEMPORARILY overrides this for that
+// one wake (so you can peek the other route), then it returns to the locked stop.
+// -----------------------------------------------------------------------------
+#define LOCATION_LOCK_ENABLE  1
+#define LOCATION_LOCK_SSID     "We have the best neighbours"
+#define LOCATION_LOCK_TO_CITY  0     // 0 = HOME (Bonney Ave morning), 1 = CITY (Adelaide St)
 
 // -----------------------------------------------------------------------------
 // FEATURE 3 — Alert banner
@@ -389,10 +450,13 @@
 //   Set conservatively: an OTA that loses power mid-flash is recoverable
 //   (ESP32 has rollback support) but wastes time.  40% is a safe default.
 // -----------------------------------------------------------------------------
-#define FW_VERSION        "3.3.0"   // THIS build's version (compare vs JSON firmware.version)
-                                    // v3.3.0: live "Updated H:MMam" footer line that ticks every
-                                    //         wake (per-minute hash term forces a redraw), and
-                                    //         far-future departures show a clock time, not "612 min".
+#define FW_VERSION        "3.4.0"   // THIS build's version (compare vs JSON firmware.version)
+                                    // v3.4.0: footer now shows "Next update H:MM" (not last-updated);
+                                    //         home-WiFi SSID locks to the morning stop; power button
+                                    //         wakes+refreshes and LEFT/RIGHT switch routes during a
+                                    //         short awake window; portal no longer re-opens on
+                                    //         transient WiFi drops (only when no creds are saved).
+                                    // v3.3.0: live "Updated H:MMam" footer line; far-future ETA clock.
 #define ENABLE_OTA        1          // 1 = allow OTA from JSON firmware block; 0 = disabled
 #define OTA_MIN_BATT_PCT  40         // minimum battery % to start OTA (ignored if monitor off)
 
