@@ -32,10 +32,12 @@
 #include <Arduino.h>
 #include <SPI.h>
 #include <WiFi.h>
+#include <WiFiMulti.h>          // multi-network auto-join (v3.1; in arduino-esp32 core)
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <esp_sleep.h>
 #include <esp_sntp.h>
+#include "esp_netif.h"          // explicit DNS resolver override (applyFallbackDNS)
 #include <Preferences.h>
 
 // ---- OTA (Feature 4) -------------------------------------------------------
@@ -83,6 +85,46 @@ RTC_DATA_ATTR static bool panelEverPainted    = false;  // FIX 1: true once the 
 static GxEPD2_4G_4G<GxEPD2_426_GDEQ0426T82, MAX_PAGE_HEIGHT>* g_pSetupDisplay = nullptr;
 
 // =============================================================================
+// Captive-portal branding (v3.1, Feature B)
+//
+// PORTAL_HEAD — a compact, self-contained stylesheet injected into every
+//   WiFiManager page via wm.setCustomHeadElement().  No external resources
+//   (no web fonts / CDN) so it works offline on the device's own AP.
+//   Translink-style maroon accent (#9e0b0f), dark text on light cards,
+//   rounded 10px touch-friendly inputs/buttons, centered max-width ~480px.
+//   Kept well under ~2 KB.
+//
+// g_portalMenuHtml — buffer for wm.setCustomMenuHTML().  WiFiManager stores the
+//   const char* pointer WITHOUT copying, so this MUST be a file-scope static
+//   that outlives the portal (a stack temporary would dangle).  It is filled in
+//   setup() just before startConfigPortal() with the branded header plus the
+//   list of currently-remembered SSIDs.
+// =============================================================================
+static const char PORTAL_HEAD[] =
+  "<style>"
+  ":root{--mar:#9e0b0f;--ink:#1b1b1b;--bg:#f3f4f6;--card:#ffffff;--line:#d9dbe0;}"
+  "*{box-sizing:border-box;}"
+  "body{margin:0;padding:16px 12px;background:var(--bg);color:var(--ink);"
+  "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;"
+  "font-size:16px;line-height:1.45;}"
+  ".wrap,body>div{max-width:480px;margin:0 auto;}"
+  "h1,h2,h3{color:var(--mar);font-weight:700;margin:.2em 0 .5em;}"
+  "div,form{background:var(--card);border:1px solid var(--line);border-radius:12px;"
+  "padding:16px;margin:12px auto;max-width:480px;}"
+  "input,button,select{width:100%;padding:13px 12px;margin:7px 0;border-radius:10px;"
+  "border:1px solid var(--line);font-size:16px;background:#fff;color:var(--ink);}"
+  "input:focus,select:focus{outline:none;border-color:var(--mar);}"
+  "button,input[type='submit']{background:var(--mar);color:#fff;border:0;font-weight:700;"
+  "cursor:pointer;min-height:48px;}"
+  "button:hover,input[type='submit']:hover{filter:brightness(1.08);}"
+  "a{color:var(--mar);}"
+  ".qbs-hdr{font-size:18px;font-weight:700;color:var(--mar);}"
+  ".qbs-sub{font-size:14px;color:#555;}"
+  "</style>";
+
+static char g_portalMenuHtml[640];   // lives for the portal's lifetime (see note above)
+
+// =============================================================================
 // NVS namespace: "busign"
 //
 // Keys:
@@ -96,6 +138,9 @@ static GxEPD2_4G_4G<GxEPD2_426_GDEQ0426T82, MAX_PAGE_HEIGHT>* g_pSetupDisplay = 
 //   "last_stop_id"  (String)  — stop_id rendered last wake (layout-change detect)
 //   "last_has_alert"(Int)     — 1 if last wake had alert banner (layout-change detect)
 //   "last_stale"    (Int)     — 1 if last wake was stale (layout-change detect)
+//   "wnet_cnt"      (Int)     — number of remembered Wi-Fi networks (0..MAX_WIFI_NETS) (v3.1)
+//   "wnet_ssid{i}"  (String)  — SSID  of remembered network i (0-based) (v3.1)
+//   "wnet_pass{i}"  (String)  — pass  of remembered network i (0-based) (v3.1)
 // =============================================================================
 
 // =============================================================================
@@ -123,6 +168,139 @@ static void loadRuntimeSettings(Preferences& prefs)
 
     Serial.printf("[NVS]  data_url=%s  refresh=%d min  rotation=%d  stop_switch_h=%d\n",
                   gDataUrl.c_str(), gRefreshMin, gRotation, gStopSwitchHour);
+}
+
+// =============================================================================
+// Multi-network Wi-Fi memory (v3.1)
+//
+// The sign remembers up to MAX_WIFI_NETS (SSID, password) pairs in NVS so it can
+// auto-join whichever remembered network is in range (via WiFiMulti).  Schema:
+//   "wnet_cnt"      (Int)     — count, clamped 0..MAX_WIFI_NETS
+//   "wnet_ssid{i}"  (String)  — SSID  of entry i (0-based)
+//   "wnet_pass{i}"  (String)  — pass  of entry i (0-based)
+//
+// loadWifiNetworks(): read the stored list into caller arrays; returns count.
+// saveWifiNetworks(): persist a list of n entries (and the count).
+// addWifiNetwork():   load -> update-if-present / append / evict-oldest -> save.
+// =============================================================================
+static int loadWifiNetworks(Preferences& p, String ssids[], String passs[], int maxN)
+{
+    int cnt = p.getInt("wnet_cnt", 0);
+    if (cnt < 0)      cnt = 0;
+    if (cnt > maxN)   cnt = maxN;            // never read past caller's buffers
+    if (cnt > MAX_WIFI_NETS) cnt = MAX_WIFI_NETS;
+
+    char keyS[16], keyP[16];
+    for (int i = 0; i < cnt; i++) {
+        snprintf(keyS, sizeof(keyS), "wnet_ssid%d", i);
+        snprintf(keyP, sizeof(keyP), "wnet_pass%d", i);
+        ssids[i] = p.getString(keyS, "");
+        passs[i] = p.getString(keyP, "");
+    }
+    return cnt;
+}
+
+static void saveWifiNetworks(Preferences& p, const String ssids[], const String passs[], int n)
+{
+    if (n < 0)              n = 0;
+    if (n > MAX_WIFI_NETS)  n = MAX_WIFI_NETS;
+
+    char keyS[16], keyP[16];
+    // Write the kept entries.
+    for (int i = 0; i < n; i++) {
+        snprintf(keyS, sizeof(keyS), "wnet_ssid%d", i);
+        snprintf(keyP, sizeof(keyP), "wnet_pass%d", i);
+        p.putString(keyS, ssids[i]);
+        p.putString(keyP, passs[i]);
+    }
+    // Remove any stale higher-index entries left over from a previously longer list.
+    for (int i = n; i < MAX_WIFI_NETS; i++) {
+        snprintf(keyS, sizeof(keyS), "wnet_ssid%d", i);
+        snprintf(keyP, sizeof(keyP), "wnet_pass%d", i);
+        p.remove(keyS);
+        p.remove(keyP);
+    }
+    p.putInt("wnet_cnt", n);
+    Serial.printf("[NVS]  Saved %d remembered Wi-Fi network(s)\n", n);
+}
+
+static void addWifiNetwork(Preferences& p, const String& ssid, const String& pass)
+{
+    if (ssid.length() == 0) {                // ignore empty SSID
+        Serial.println("[NVS]  addWifiNetwork: empty SSID — ignored");
+        return;
+    }
+
+    String ssids[MAX_WIFI_NETS];
+    String passs[MAX_WIFI_NETS];
+    int n = loadWifiNetworks(p, ssids, passs, MAX_WIFI_NETS);
+
+    // If already present: only write when the password actually changed to a
+    // new non-empty value.  This keeps the "remember on every connect" refresh
+    // call cheap (no NVS wear) and prevents a momentarily-empty psk() from
+    // clobbering a good stored password.
+    for (int i = 0; i < n; i++) {
+        if (ssids[i] == ssid) {
+            if (pass.length() == 0 || passs[i] == pass) {
+                return;                       // unchanged / nothing safe to update
+            }
+            passs[i] = pass;
+            saveWifiNetworks(p, ssids, passs, n);
+            Serial.printf("[NVS]  Updated remembered network \"%s\"\n", ssid.c_str());
+            return;
+        }
+    }
+
+    if (n < MAX_WIFI_NETS) {
+        // Room to append.
+        ssids[n] = ssid;
+        passs[n] = pass;
+        n++;
+    } else {
+        // Full — drop oldest (index 0), shift down, append new at the end.
+        for (int i = 1; i < MAX_WIFI_NETS; i++) {
+            ssids[i - 1] = ssids[i];
+            passs[i - 1] = passs[i];
+        }
+        ssids[MAX_WIFI_NETS - 1] = ssid;
+        passs[MAX_WIFI_NETS - 1] = pass;
+        n = MAX_WIFI_NETS;
+        Serial.println("[NVS]  Network list full — evicted oldest entry");
+    }
+
+    saveWifiNetworks(p, ssids, passs, n);
+    Serial.printf("[NVS]  Remembered new network \"%s\" (%d total)\n", ssid.c_str(), n);
+}
+
+// =============================================================================
+// applyFallbackDNS() — force a public DNS resolver (8.8.8.8 / 1.1.1.1).
+//
+// Some routers hand out a DHCP lease with no usable DNS server (or one the
+// device can't reach), which makes EVERY hostname lookup fail
+// ("hostByName(): DNS Failed for ...") even though Wi-Fi is connected and an IP
+// was assigned — NTP and the departures fetch both die with that.  Setting the
+// resolver explicitly after the IP is up sidesteps a broken router DNS while
+// keeping the DHCP-assigned IP/gateway.  Call once, right after Wi-Fi connects.
+// =============================================================================
+static void applyFallbackDNS()
+{
+    esp_netif_t* sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    if (sta == nullptr) {
+        Serial.println("[DNS]  STA netif not found — leaving resolver as-is");
+        return;
+    }
+
+    esp_netif_dns_info_t mainDns = {};
+    mainDns.ip.type            = ESP_IPADDR_TYPE_V4;
+    mainDns.ip.u_addr.ip4.addr = esp_ip4addr_aton("8.8.8.8");
+    esp_netif_set_dns_info(sta, ESP_NETIF_DNS_MAIN, &mainDns);
+
+    esp_netif_dns_info_t backupDns = {};
+    backupDns.ip.type            = ESP_IPADDR_TYPE_V4;
+    backupDns.ip.u_addr.ip4.addr = esp_ip4addr_aton("1.1.1.1");
+    esp_netif_set_dns_info(sta, ESP_NETIF_DNS_BACKUP, &backupDns);
+
+    Serial.println("[DNS]  Resolver forced to 8.8.8.8 / 1.1.1.1");
 }
 
 // =============================================================================
@@ -608,10 +786,45 @@ void setup()
         // Path B: phone captive-portal flow
         Serial.println("[WIFI] Portal mode — trying saved credentials...");
         WiFi.mode(WIFI_STA);
-        WiFi.begin();
 
         bool wifiConnected = false;
+
+        // ---- Multi-network auto-join (v3.1, Feature A) ----------------------
+        // Before the legacy single-creds connect/portal block, try every Wi-Fi
+        // network the user has remembered and join whichever is in range.
+        // (Migration of a prior 3.0 single saved network into this list happens
+        // after a successful connect below, where its credentials are readable.)
         {
+            String wnSsids[MAX_WIFI_NETS];
+            String wnPasss[MAX_WIFI_NETS];
+            int wnCount = loadWifiNetworks(prefs, wnSsids, wnPasss, MAX_WIFI_NETS);
+
+            if (wnCount > 0) {
+                Serial.printf("[WIFI] Multi mode — %d remembered network(s), scanning...\n",
+                              wnCount);
+                WiFiMulti wifiMulti;
+                for (int i = 0; i < wnCount; i++) {
+                    if (wnSsids[i].length() == 0) continue;
+                    wifiMulti.addAP(wnSsids[i].c_str(), wnPasss[i].c_str());
+                }
+                if (wifiMulti.run(WIFI_TIMEOUT_MS) == WL_CONNECTED) {
+                    wifiConnected = true;
+                    wifiFailCount = 0;
+                    Serial.printf("[WIFI] Multi connected — IP: %s  (SSID \"%s\")\n",
+                                  WiFi.localIP().toString().c_str(),
+                                  WiFi.SSID().c_str());
+                } else {
+                    Serial.println("[WIFI] Multi: no remembered network in range");
+                }
+            }
+        }
+
+        // ---- Legacy single saved-credentials attempt -----------------------
+        // Only runs if the multi attempt above did not connect (e.g. no list, or
+        // none of the remembered networks were reachable this wake).
+        if (!wifiConnected) {
+            WiFi.begin();
+
             uint32_t wifi_start = millis();
             while (millis() - wifi_start < WIFI_TIMEOUT_MS) {
                 if (WiFi.status() == WL_CONNECTED) {
@@ -621,13 +834,20 @@ void setup()
                 delay(250);
                 Serial.print('.');
             }
+            Serial.println();
         }
-        Serial.println();
 
         if (wifiConnected) {
             wifiFailCount = 0;
             Serial.printf("[WIFI] Connected (saved creds) — IP: %s\n",
                           WiFi.localIP().toString().c_str());
+
+            // Remember whatever we just connected to.  Covers the 3.0 -> 3.1
+            // migration (the single saved network now has readable creds) and
+            // refreshes the stored entry.  addWifiNetwork() is a no-op when the
+            // network is already stored identically, so this is safe to run on
+            // every wake without wearing NVS.
+            addWifiNetwork(prefs, WiFi.SSID(), WiFi.psk());
 
         } else {
             bool noSavedCreds   = (WiFi.SSID().length() == 0);
@@ -642,6 +862,36 @@ void setup()
 
                 WiFiManager wm;
                 wm.setConfigPortalTimeout(WIFI_PORTAL_TIMEOUT_S);
+
+                // ---- Portal branding (v3.1, Feature B) -----------------------
+                // Title, self-contained stylesheet (offline-safe), and a branded
+                // header that also lists any networks already remembered.
+                wm.setTitle("QLD Bus Sign");
+                wm.setCustomHeadElement(PORTAL_HEAD);
+
+                {
+                    // Build the "Remembered networks: ..." line into the file-scope
+                    // static buffer (setCustomMenuHTML keeps the pointer, no copy).
+                    String wnSsids[MAX_WIFI_NETS];
+                    String wnPasss[MAX_WIFI_NETS];
+                    int wnCount = loadWifiNetworks(prefs, wnSsids, wnPasss, MAX_WIFI_NETS);
+
+                    String remembered;
+                    for (int i = 0; i < wnCount; i++) {
+                        if (wnSsids[i].length() == 0) continue;
+                        if (remembered.length() > 0) remembered += ", ";
+                        remembered += wnSsids[i];
+                    }
+                    if (remembered.length() == 0) remembered = "none yet";
+
+                    snprintf(g_portalMenuHtml, sizeof(g_portalMenuHtml),
+                             "<div class='qbs-hdr'>&#128652; QLD Bus Sign &mdash; WiFi setup</div>"
+                             "<div class='qbs-sub'>Pick your Wi-Fi below; the sign will remember it "
+                             "and auto-join wherever you take it.</div>"
+                             "<div class='qbs-sub'>Remembered networks: %s</div>",
+                             remembered.c_str());
+                    wm.setCustomMenuHTML(g_portalMenuHtml);
+                }
 
                 // ---- Portal custom parameters --------------------------------
                 char curRefreshStr[4];
@@ -691,6 +941,10 @@ void setup()
                                        paramRotation.getValue(),
                                        paramStopSwitch.getValue());
 
+                    // Remember the freshly-configured network (v3.1, Feature A)
+                    // so future wakes auto-join it via WiFiMulti.
+                    addWifiNetwork(prefs, wm.getWiFiSSID(), wm.getWiFiPass());
+
                     display.init(115200, /*initial=*/false, /*reset_duration=*/10);
                     display.setRotation(gRotation);
 
@@ -727,6 +981,12 @@ void setup()
         Serial.printf("[WIFI] Ready — IP: %s  (wifiFailCount=%d)\n",
                       WiFi.localIP().toString().c_str(), wifiFailCount);
     }
+
+    // ---- 4b. Force a usable DNS resolver -----------------------------------
+    // Wi-Fi is connected here (via either path).  Guarantee name resolution
+    // works even if the router's DHCP handed out no/broken DNS — otherwise NTP
+    // and the departures fetch both fail with "DNS Failed".
+    applyFallbackDNS();
 
     // ---- 5. NTP time sync --------------------------------------------------
     Serial.printf("[NTP]  Syncing from %s / %s ...\n", NTP_SERVER_1, NTP_SERVER_2);
@@ -769,44 +1029,62 @@ void setup()
     time_t fetchEpoch = 0;
     String jsonBody;
 
-    HTTPClient http;
-    if (!http.begin(client, url)) {
-        Serial.println("[HTTP] begin() failed — will try cache");
-        http.end();
-    } else {
-        http.setTimeout(HTTP_TIMEOUT_MS);
-        http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
-        http.addHeader("Cache-Control", "no-cache");
+    // FIX (v3.1, Feature C): on the very first request after Wi-Fi comes up, DNS
+    // and the TLS stack sometimes aren't ready yet, which surfaced as a spurious
+    // "No connection" on first boot.  A one-time short settle here fixes it.
+    delay(600);  // DNS / TLS settle — once, before the first GET
 
-        int httpCode = http.GET();
-        Serial.printf("[HTTP] Response code: %d\n", httpCode);
-
-        if (httpCode == 200) {
-            int contentLen = http.getSize();
-            // FIX 3: simplified early reject — catches known-too-large Content-Length.
-            // Does NOT reject chunked (contentLen==-1); those are caught post-getString below.
-            if (contentLen > 8192) {
-                Serial.printf("[HTTP] Body too large (%d B, Content-Length) — rejecting\n", contentLen);
-                http.end();
-            } else {
-                jsonBody = http.getString();
-                http.end();
-                // FIX 3: post-getString guard catches chunked responses and any other
-                // case where Content-Length was absent or misleading.  An empty body or
-                // a body >8192 B is rejected; we fall through to the NVS cache path.
-                if (jsonBody.length() == 0 || jsonBody.length() > 8192) {
-                    Serial.printf("[HTTP] Body rejected after getString: %d bytes\n",
-                                  jsonBody.length());
-                    fetchOk = false;
-                } else {
-                    fetchOk    = true;
-                    fetchEpoch = now_utc;
-                    Serial.printf("[HTTP] Body length: %d bytes\n", jsonBody.length());
-                }
-            }
-        } else {
-            Serial.printf("[HTTP] Error %d — will try cache\n", httpCode);
+    // FIX (v3.1, Feature C): retry the departures GET up to 3 times before
+    // falling through to the cache/no-connection path.  Each attempt re-begins
+    // the request exactly as the single-shot code did; we only break early on a
+    // good (200 + acceptable body) fetch.  Parse/cache/render below is unchanged.
+    for (int attempt = 1; attempt <= 3; attempt++) {
+        HTTPClient http;
+        if (!http.begin(client, url)) {
+            Serial.println("[HTTP] begin() failed — will try cache");
             http.end();
+        } else {
+            http.setTimeout(HTTP_TIMEOUT_MS);
+            http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
+            http.addHeader("Cache-Control", "no-cache");
+
+            int httpCode = http.GET();
+            Serial.printf("[HTTP] Response code: %d\n", httpCode);
+
+            if (httpCode == 200) {
+                int contentLen = http.getSize();
+                // FIX 3: simplified early reject — catches known-too-large Content-Length.
+                // Does NOT reject chunked (contentLen==-1); those are caught post-getString below.
+                if (contentLen > 8192) {
+                    Serial.printf("[HTTP] Body too large (%d B, Content-Length) — rejecting\n", contentLen);
+                    http.end();
+                } else {
+                    jsonBody = http.getString();
+                    http.end();
+                    // FIX 3: post-getString guard catches chunked responses and any other
+                    // case where Content-Length was absent or misleading.  An empty body or
+                    // a body >8192 B is rejected; we fall through to the NVS cache path.
+                    if (jsonBody.length() == 0 || jsonBody.length() > 8192) {
+                        Serial.printf("[HTTP] Body rejected after getString: %d bytes\n",
+                                      jsonBody.length());
+                        fetchOk = false;
+                    } else {
+                        fetchOk    = true;
+                        fetchEpoch = now_utc;
+                        Serial.printf("[HTTP] Body length: %d bytes\n", jsonBody.length());
+                    }
+                }
+            } else {
+                Serial.printf("[HTTP] Error %d — will try cache\n", httpCode);
+                http.end();
+            }
+        }
+
+        if (fetchOk) break;  // got a good body — stop retrying
+
+        if (attempt < 3) {
+            Serial.printf("[HTTP] retry %d/3\n", attempt);
+            delay(800);
         }
     }
     WiFi.disconnect(true);
