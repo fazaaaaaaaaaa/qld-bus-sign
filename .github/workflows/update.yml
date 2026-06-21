@@ -69,20 +69,22 @@ jobs:
         # If the RT feed is down, the script still exits 0 with scheduled-only data.
         run: python update_departures.py
 
-      - name: Copy OTA firmware assets into public/ (if published)
-        # When the build-firmware workflow has run, cloud/public_assets/ will contain
-        # firmware.bin and firmware.json.  Copy them into public/ so they are served at:
-        #   /firmware.bin   — raw binary for OTA download
-        #   /firmware.json  — manifest {version, bin_url, sha256}
-        # This step is intentionally non-fatal: if public_assets/ does not exist
-        # (no firmware build yet) we just skip silently.
+      - name: Copy firmware + flasher assets into public/ (if published)
+        # When the build-firmware workflow has run, public_assets/ contains the OTA
+        # binary + manifest AND the web-flasher assets.  Publish the whole folder so
+        # these are served at the Pages root:
+        #   /firmware.bin          — app binary for OTA download
+        #   /firmware.json         — OTA manifest {version, bin_url, sha256}
+        #   /firmware-merged.bin   — full factory image (web flasher + esptool)
+        #   /manifest.json         — ESP Web Tools manifest
+        #   /install.html          — one-click browser flasher page
+        # Non-fatal: if public_assets/ does not exist yet we just skip silently.
         run: |
           if [ -d public_assets ]; then
-            echo "Copying OTA firmware assets into public/…"
-            cp -v public_assets/firmware.bin  public/firmware.bin  2>/dev/null || true
-            cp -v public_assets/firmware.json public/firmware.json 2>/dev/null || true
+            echo "Publishing public_assets/* → public/ …"
+            cp -rv public_assets/* public/ 2>/dev/null || true
           else
-            echo "public_assets/ not present — no firmware assets to publish."
+            echo "public_assets/ not present — no firmware/flasher assets to publish."
           fi
 
       - name: Upload Pages artifact

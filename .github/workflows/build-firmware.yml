@@ -1,44 +1,37 @@
-# build-firmware.yml — OTA firmware binary build + manifest publish
+# build-firmware.yml — Compile firmware, publish OTA + web-flasher assets
 #
-# This workflow compiles the ESP32-C3 firmware with PlatformIO, computes its
-# sha256, writes cloud/public_assets/firmware.json + firmware.bin, and commits
-# them back to the repo.  The update.yml workflow then copies those files into
-# public/ on every deploy run, serving them at:
+# Compiles the ESP32-C3 firmware with PlatformIO and produces, in public_assets/:
+#   firmware.bin          — app image (for over-the-air self-update)
+#   firmware.json         — OTA manifest {version, bin_url, sha256}
+#   firmware-merged.bin   — full factory image (bootloader+partitions+otadata+app
+#                           merged at the right offsets) for the FIRST flash
+#   manifest.json         — ESP Web Tools manifest pointing at firmware-merged.bin
 #
-#   /firmware.bin  — raw binary for OTA download
-#   /firmware.json — manifest {version, bin_url, sha256}
+# update.yml then copies public_assets/* into public/ on its next run, so they are
+# served from the Pages root and the one-click flasher (install.html) works.
 #
 # HOW TO CUT A FIRMWARE RELEASE:
-#   1. Bump FW_VERSION in firmware/include/config.h (e.g. "1.4.0").
-#   2. Commit and push a tag starting with "fw-" (e.g. "fw-1.4.0").
-#      The push-tag trigger fires this workflow automatically.
-#   3. Alternatively, trigger it manually from Actions → Build Firmware → Run workflow.
-#   4. After the workflow succeeds, the next update.yml run will include the
-#      firmware block in departures.json and devices will see the OTA update.
-#
-# PREREQUISITES:
-#   - The firmware must compile cleanly with PlatformIO env "xteink-x4".
-#   - firmware/include/config.h must contain:  #define FW_VERSION "x.y.z"
-#   - This workflow is intentionally separate from the update cycle and is run
-#     ONLY when cutting a firmware release.
+#   1. Bump FW_VERSION in firmware/include/config.h (e.g. "3.1.0").
+#   2. Commit + push a tag starting with "fw-" (e.g. "fw-3.1.0"), OR
+#      run it manually: Actions → Build Firmware → Run workflow.
+#   3. After it succeeds, run Update Departures once (or wait for the 5-min cron)
+#      to publish the assets to Pages. Devices then see the OTA update; new devices
+#      can be flashed from /install.html.
 
 name: Build Firmware
 
 on:
-  # Manual trigger — useful for testing without creating a tag.
   workflow_dispatch:
-  # Automatic trigger when a firmware release tag is pushed.
   push:
     tags:
       - "fw-*"
 
 permissions:
-  contents: write   # needed to commit firmware.json + firmware.bin back to the repo
+  contents: write   # commit firmware assets back to the repo
 
 jobs:
   build-firmware:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -48,76 +41,102 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install PlatformIO
-        run: pip install platformio
+      - name: Install PlatformIO + esptool
+        # esptool pinned <5 so the `merge_bin` subcommand + underscore flags are stable.
+        run: pip install platformio "esptool<5"
 
       - name: Build firmware (env xteink-x4)
-        # Compiles the firmware for the Xteink X4 board.
-        # This step will fail if the firmware does not compile — do not suppress.
+        # First real compile. This step fails loudly if the firmware does not build.
         run: pio run --environment xteink-x4
         working-directory: firmware
-
-      - name: Locate firmware binary
-        id: locate_bin
-        # PlatformIO writes the binary to .pio/build/<env>/firmware.bin.
-        run: |
-          BIN=$(find firmware/.pio/build/xteink-x4 -name "firmware.bin" | head -1)
-          if [ -z "$BIN" ]; then
-            echo "ERROR: firmware.bin not found after pio run." >&2
-            exit 1
-          fi
-          echo "bin_path=$BIN" >> "$GITHUB_OUTPUT"
-          echo "Firmware binary: $BIN ($(du -h "$BIN" | cut -f1))"
-
-      - name: Compute sha256
-        id: sha256
-        run: |
-          SHA=$(sha256sum "${{ steps.locate_bin.outputs.bin_path }}" | awk '{print $1}')
-          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
-          echo "sha256: $SHA"
 
       - name: Read FW_VERSION from firmware/include/config.h
         id: fw_version
         run: |
           VER=$(grep -oP '(?<=#define FW_VERSION ")([^"]+)' firmware/include/config.h)
           if [ -z "$VER" ]; then
-            echo "ERROR: Could not parse FW_VERSION from firmware/include/config.h" >&2
-            echo "Expected a line like:  #define FW_VERSION \"1.3.0\"" >&2
+            echo "ERROR: could not parse FW_VERSION from firmware/include/config.h" >&2
             exit 1
           fi
           echo "version=$VER" >> "$GITHUB_OUTPUT"
           echo "FW_VERSION: $VER"
 
-      - name: Write firmware manifest (cloud/public_assets/firmware.json)
+      - name: Locate build artifacts
+        id: bins
         run: |
-          mkdir -p cloud/public_assets
+          BD=firmware/.pio/build/xteink-x4
+          for f in firmware.bin bootloader.bin partitions.bin; do
+            if [ ! -f "$BD/$f" ]; then
+              echo "ERROR: missing $BD/$f" >&2; ls -la "$BD" >&2; exit 1
+            fi
+          done
+          BOOT=$(find ~/.platformio -name boot_app0.bin | head -1)
+          if [ -z "$BOOT" ]; then
+            echo "ERROR: boot_app0.bin not found in ~/.platformio" >&2; exit 1
+          fi
+          echo "bd=$BD" >> "$GITHUB_OUTPUT"
+          echo "boot_app0=$BOOT" >> "$GITHUB_OUTPUT"
+          echo "app bin size: $(du -h "$BD/firmware.bin" | cut -f1)"
+
+      - name: Compute sha256 of app binary (for OTA)
+        id: sha256
+        run: |
+          SHA=$(sha256sum "${{ steps.bins.outputs.bd }}/firmware.bin" | awk '{print $1}')
+          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
+          echo "sha256: $SHA"
+
+      - name: Build merged factory image (web flasher + esptool fallback)
+        # Offsets match the Arduino default_16MB.csv partition table:
+        #   0x0      bootloader      0x8000  partition table
+        #   0xe000   otadata          0x10000 app (ota_0)
+        run: |
+          mkdir -p public_assets
+          python -m esptool --chip esp32c3 merge_bin \
+            -o public_assets/firmware-merged.bin \
+            --flash_mode dio --flash_freq 80m --flash_size 16MB \
+            0x0     "${{ steps.bins.outputs.bd }}/bootloader.bin" \
+            0x8000  "${{ steps.bins.outputs.bd }}/partitions.bin" \
+            0xe000  "${{ steps.bins.outputs.boot_app0 }}" \
+            0x10000 "${{ steps.bins.outputs.bd }}/firmware.bin"
+          echo "merged image: $(du -h public_assets/firmware-merged.bin | cut -f1)"
+
+      - name: Copy app binary (for OTA) into public_assets/
+        run: cp "${{ steps.bins.outputs.bd }}/firmware.bin" public_assets/firmware.bin
+
+      - name: Write OTA manifest + ESP Web Tools manifest
+        run: |
           python3 - <<'PYEOF'
           import json, os
-          data = {
-              "version": os.environ["FW_VERSION"],
-              "bin_url": "https://fazaaaaaaaaaa.github.io/qld-bus-sign/firmware.bin",
-              "sha256":  os.environ["SHA256"],
-          }
-          with open("cloud/public_assets/firmware.json", "w") as f:
-              json.dump(data, f, indent=2)
-          print("Written cloud/public_assets/firmware.json:", data)
+          ver = os.environ["FW_VERSION"]
+          sha = os.environ["SHA256"]
+          with open("public_assets/firmware.json", "w") as f:
+              json.dump({
+                  "version": ver,
+                  "bin_url": "https://fazaaaaaaaaaa.github.io/qld-bus-sign/firmware.bin",
+                  "sha256":  sha,
+              }, f, indent=2)
+          with open("public_assets/manifest.json", "w") as f:
+              json.dump({
+                  "name": "QLD Bus Sign",
+                  "version": ver,
+                  "new_install_prompt_erase": True,
+                  "builds": [{
+                      "chipFamily": "ESP32-C3",
+                      "parts": [{"path": "firmware-merged.bin", "offset": 0}],
+                  }],
+              }, f, indent=2)
+          print("wrote firmware.json + manifest.json for v" + ver)
           PYEOF
         env:
           FW_VERSION: ${{ steps.fw_version.outputs.version }}
           SHA256: ${{ steps.sha256.outputs.sha256 }}
 
-      - name: Copy firmware binary to cloud/public_assets/firmware.bin
-        run: |
-          mkdir -p cloud/public_assets
-          cp "${{ steps.locate_bin.outputs.bin_path }}" cloud/public_assets/firmware.bin
-          echo "Copied firmware.bin to cloud/public_assets/ ($(du -h cloud/public_assets/firmware.bin | cut -f1))"
-
-      - name: Commit firmware manifest + binary back to repo
+      - name: Commit firmware assets back to repo
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add cloud/public_assets/firmware.json cloud/public_assets/firmware.bin
-          # Only commit if there are actual changes.
+          git add public_assets/firmware.bin public_assets/firmware.json \
+                  public_assets/firmware-merged.bin public_assets/manifest.json
           git diff --cached --quiet || git commit -m \
-            "chore: publish firmware v${{ steps.fw_version.outputs.version }} OTA assets [skip ci]"
+            "chore: publish firmware v${{ steps.fw_version.outputs.version }} (OTA + web flasher) [skip ci]"
           git push
