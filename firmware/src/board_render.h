@@ -351,6 +351,39 @@ static void formatLocalTime12h(time_t  utc_epoch,
 }
 
 // =============================================================================
+// formatLocalTime12hCompact()  — v3.3.0
+//
+// Same 12-hour clock as formatLocalTime12h() but COMPACT: lowercase suffix and
+// NO space, e.g. "8:14pm".  Used by:
+//   (A) the live "Updated H:MMam" footer line (Feature A — "always looks alive")
+//   (B) the far-future departure clock time in etaString() (Feature B)
+//
+// shortSuffix=true  → single-letter suffix "a"/"p"  (e.g. "6:02a")  — tightest,
+//                     used in the narrow Departing column so a far-off bus fits.
+// shortSuffix=false → "am"/"pm"                      (e.g. "8:14pm") — footer line.
+// =============================================================================
+static void formatLocalTime12hCompact(time_t  utc_epoch,
+                                      int32_t utc_offset_seconds,
+                                      bool    shortSuffix,
+                                      char*   buf,
+                                      size_t  bufLen)
+{
+    int64_t local_epoch = (int64_t)utc_epoch + (int64_t)utc_offset_seconds;
+    int32_t day_sec = (int32_t)(local_epoch % 86400LL);
+    if (day_sec < 0) day_sec += 86400;
+    int hh24 = day_sec / 3600;
+    int mm   = (day_sec % 3600) / 60;
+
+    int hh12 = hh24 % 12;
+    if (hh12 == 0) hh12 = 12;  // 0 → 12 (midnight/noon)
+
+    // Lowercase suffix, no leading space (compact).  "a"/"p" or "am"/"pm".
+    const char* period = shortSuffix ? ((hh24 < 12) ? "a"  : "p")
+                                     : ((hh24 < 12) ? "am" : "pm");
+    snprintf(buf, bufLen, "%d:%02d%s", hh12, mm, period);
+}
+
+// =============================================================================
 // formatLocalDate()
 //
 // Converts UTC epoch + offset to "Day DDth Mon" string, e.g. "Wed 18th Mar".
@@ -384,16 +417,30 @@ static void formatLocalDate(time_t  utc_epoch,
 // etaString()
 //
 // Derives ETA display fields from absolute UTC departure time and now_utc.
-// Identical logic to the existing board_render.h (data layer untouched).
 //
-// numBuf  — receives "Now", "CNCL", "---", ">90", or a digit string
-// unitBuf — receives "min" or ""
+// numBuf  — receives "Now", "CNCL", "---", a clock time (e.g. "6:02a"), or a
+//           digit string
+// unitBuf — receives "min" or "" (empty for clock-time / lone-word render path)
 // isGone  — set true when the entry should be dropped (>60 s past)
+//
+// v3.3.0 (Feature B) — FAR-FUTURE departures show a CLOCK TIME, not huge minutes.
+//   The backend now returns the NEXT departures even when they are tomorrow
+//   (e.g. tonight it returns tomorrow's 6:02am bus).  Rendering "minutes until"
+//   would read "612 min", which is useless.  For departures more than
+//   ETA_CLOCK_THRESHOLD_MIN (90) minutes away we instead render the LOCAL clock
+//   time (e.g. "6:02a") with an EMPTY unit, so it routes to the lone-word render
+//   path in drawBoard() (big bold number, right-aligned, no "min").  Near-term
+//   departures keep the existing "Now" / "X min" formatting unchanged.
+//   utc_offset_seconds (from JSON; default 36000 = AEST) converts now_utc+dep_utc
+//   to the local clock; the compact "6:02a" form keeps it inside the column width.
 // =============================================================================
+static constexpr int64_t ETA_CLOCK_THRESHOLD_MIN = 90;  // > this → show clock time, not minutes
+
 static void etaString(time_t dep_utc, time_t now_utc, bool cancelled,
                       char* numBuf, size_t numLen,
                       char* unitBuf, size_t unitLen,
-                      bool* isGone)
+                      bool* isGone,
+                      int32_t utc_offset_seconds = 36000)  // v3.3.0: for far-future clock time
 {
     *isGone = false;
 
@@ -425,9 +472,14 @@ static void etaString(time_t dep_utc, time_t now_utc, bool cancelled,
     }
 
     int64_t delta_min = delta_s / 60LL;
-    if (delta_min > 90LL) {
-        snprintf(numBuf,  numLen,  ">90");
-        snprintf(unitBuf, unitLen, "min");
+    if (delta_min > ETA_CLOCK_THRESHOLD_MIN) {
+        // v3.3.0 (Feature B): too far out for a useful countdown — show the local
+        // clock time of the departure instead (e.g. "6:02a").  Empty unit so the
+        // renderer draws it as a lone big number (no "min").  Compact short-suffix
+        // form keeps it within the narrow Departing column.
+        formatLocalTime12hCompact(dep_utc, utc_offset_seconds, /*shortSuffix=*/true,
+                                  numBuf, numLen);
+        unitBuf[0] = '\0';
         return;
     }
 
@@ -542,11 +594,31 @@ void drawBoard(GxEPD2_Type&        display,
         }
     }
 
+    // ---- Pre-compute LIVE "Updated H:MMam" string (Feature A — v3.3.0) --------
+    // This is the CURRENT local time (now_utc + utc_offset), NOT the fetch time.
+    // It ticks every wake so the sign always "looks alive" even when the
+    // departures content is byte-for-byte unchanged (main.cpp folds the local
+    // minute into the content hash so an unchanged board still repaints once a
+    // minute and this line advances).  Rendered in the footer/status strip, which
+    // sits INSIDE the partial-refresh window (y >= COLHDR_BOT), so it refreshes
+    // on partial updates too — not just on full refreshes.
+    // NTP-failed fallback (now_utc == 0): show "Updated --:--".
+    char liveUpdatedBuf[24];   // "Updated 12:59pm" worst case = 15 chars
+    if (now_utc > 0) {
+        char liveTimeBuf[12];  // "12:59pm"
+        formatLocalTime12hCompact(now_utc, utc_offset_seconds, /*shortSuffix=*/false,
+                                  liveTimeBuf, sizeof(liveTimeBuf));
+        snprintf(liveUpdatedBuf, sizeof(liveUpdatedBuf), "Updated %s", liveTimeBuf);
+    } else {
+        strncpy(liveUpdatedBuf, "Updated --:--", sizeof(liveUpdatedBuf));
+        liveUpdatedBuf[sizeof(liveUpdatedBuf)-1] = '\0';
+    }
+
     // ---- Pre-build per-row data (ETA, done before paged loop) ----------------
     struct RowData {
         char route[12];
         char dest[80];
-        char etaNum[8];   // "5", "Now", "CNCL", ">90", "---", "?"
+        char etaNum[8];   // "5", "Now", "CNCL", clock time (e.g. "6:02a"), "---", "?"  (v3.3.0: far-future → clock)
         char etaUnit[8];  // "min" or ""
         bool live;
         bool cancelled;
@@ -568,7 +640,8 @@ void drawBoard(GxEPD2_Type&        display,
         etaString(dep_time, now_utc, cancelled,
                   etaNum,  sizeof(etaNum),
                   etaUnit, sizeof(etaUnit),
-                  &isGone);
+                  &isGone,
+                  utc_offset_seconds);   // v3.3.0 (Feature B): far-future → local clock time
         if (isGone) continue;
 
         RowData& r = rows[numRows++];
@@ -857,6 +930,16 @@ void drawBoard(GxEPD2_Type&        display,
 
         drawSignalArc(display, COL_ROUTE_X + 150, fy + 78, GxEPD_DARKGREY);
 
+        // ---- LIVE "Updated H:MMam" line (Feature A — v3.3.0) -----------------
+        // Right-aligned to COL_DEP_R, sat on the footer-strip baseline (fy+20) in
+        // the empty right-hand gap beside "Services at this stop".  This is the
+        // CURRENT local time and ticks every wake (see liveUpdatedBuf above), so
+        // the sign always looks alive even when departures are unchanged.
+        // Lives in the footer (y >= COLHDR_BOT) → inside the partial window, so it
+        // refreshes on partial updates too.  FreeSans9pt7b, dark grey, unobtrusive.
+        display.setFont(&FreeSans9pt7b);
+        drawTextRightAligned(display, COL_DEP_R, fy + 20, liveUpdatedBuf, GxEPD_DARKGREY);
+
         // ================================================================
         // SECTION 5 — Bottom info bar (updated/stale badge + battery)
         // ================================================================
@@ -1079,10 +1162,29 @@ void drawSetupScreen(GxEPD2_Type& display, const char* apName, const char* ip)
 // Renders a minimal "no data / no connection" screen for the case where:
 //   - a live fetch failed, AND
 //   - there is no cached JSON in NVS (first boot or NVS erased).
+//
+// v3.3.0 (Feature A): also renders the live "Updated H:MMam" line at the bottom
+//   so the no-departures / no-data screen ALSO looks alive (matches the normal
+//   board).  now_utc/utc_offset_seconds are optional (default 0 / AEST); when
+//   now_utc == 0 (NTP failed) the line falls back to "Updated --:--".
 // =============================================================================
 template <typename GxEPD2_Type>
-void drawNoDataScreen(GxEPD2_Type& display)
+void drawNoDataScreen(GxEPD2_Type& display,
+                      time_t  now_utc            = 0,
+                      int32_t utc_offset_seconds = 36000)
 {
+    // Live "Updated H:MMam" string (current local time; ticks each wake).
+    char liveUpdatedBuf[24];
+    if (now_utc > 0) {
+        char liveTimeBuf[12];
+        formatLocalTime12hCompact(now_utc, utc_offset_seconds, /*shortSuffix=*/false,
+                                  liveTimeBuf, sizeof(liveTimeBuf));
+        snprintf(liveUpdatedBuf, sizeof(liveUpdatedBuf), "Updated %s", liveTimeBuf);
+    } else {
+        strncpy(liveUpdatedBuf, "Updated --:--", sizeof(liveUpdatedBuf));
+        liveUpdatedBuf[sizeof(liveUpdatedBuf)-1] = '\0';
+    }
+
     display.setFullWindow();
     display.firstPage();
     do {
@@ -1139,6 +1241,19 @@ void drawNoDataScreen(GxEPD2_Type& display)
             int16_t tx = (PANEL_W - (int16_t)bw) / 2 - bx;
             display.setCursor(tx, 750);
             display.print(hint);
+        }
+
+        // ---- LIVE "Updated H:MMam" line (Feature A — v3.3.0) -----------------
+        // Centred at the very bottom so even the no-data screen ticks and looks
+        // alive.  Current local time (or "Updated --:--" when NTP failed).
+        {
+            display.setFont(&FreeSans9pt7b);
+            display.setTextColor(GxEPD_DARKGREY);
+            int16_t bx, by; uint16_t bw, bh;
+            display.getTextBounds(liveUpdatedBuf, 0, 0, &bx, &by, &bw, &bh);
+            int16_t tx = (PANEL_W - (int16_t)bw) / 2 - bx;
+            display.setCursor(tx, 780);
+            display.print(liveUpdatedBuf);
         }
 
     } while (display.nextPage());

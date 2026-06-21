@@ -590,18 +590,43 @@ static inline uint32_t fnv1a_str(uint32_t h, const char* s)
 //
 // We compute etaNum for each departure so the hash changes on minute boundaries
 // (when a departure crosses "Now" or disappears), matching what the display shows.
+//
+// v3.3.0 (Feature A — "always looks alive"): we ALSO fold the current LOCAL
+// MINUTE into the hash.  The live "Updated H:MMam" footer line ticks every
+// minute, so each new minute must count as "changed" and force a redraw — even
+// when the departures content is byte-for-byte identical.  Without this term, a
+// quiet evening with no departure changes would skip the redraw (Feature 1a) and
+// the on-screen time would freeze, making the sign look dead.
+//   TRADE-OFF: this makes the panel do (at most) one extra partial refresh per
+//   minute when nothing else changed.  That is fine for an always-on / USB sign
+//   (the whole point of the live clock) and the periodic FULL refresh / ghost-
+//   clear cadence (FULL_REFRESH_EVERY) is unchanged, so panel health is intact.
+//   Only the partial-update skip decision is affected.
+//   utc_offset is passed for parity with the display: the local-minute value and
+//   the far-future clock-time etaNum are both computed with the same offset.
 static uint32_t computeContentHash(const char*    selectedStopId,
                                    JsonArrayConst departures,
                                    JsonArrayConst alerts,
                                    time_t         now_utc,
                                    bool           hasAlerts,
                                    bool           stale,
-                                   int            batteryPct)
+                                   int            batteryPct,
+                                   int32_t        utc_offset)
 {
     uint32_t h = 2166136261UL;  // FNV-1a offset basis
 
     // Stop identity
     h = fnv1a_str(h, selectedStopId);
+
+    // v3.3.0 (Feature A): current LOCAL minute — ticks the hash once a minute so
+    // the live "Updated H:MMam" line repaints and the sign always looks alive.
+    // Only meaningful when NTP succeeded (now_utc > 0); when NTP failed the time
+    // shows "Updated --:--" and there is nothing to tick, so we skip this term
+    // (preserving the pre-v3.3.0 skip-when-unchanged behaviour on NTP failure).
+    if (now_utc > 0) {
+        int64_t localMinute = ((int64_t)now_utc + (int64_t)utc_offset) / 60LL;  // e.g. (now_utc+utc_offset)/60
+        h = fnv1a_update(h, (const uint8_t*)&localMinute, sizeof(localMinute));
+    }
 
     // Departure rows (matching the effectiveMaxRows logic in drawBoard)
     const int effectiveMaxRows = hasAlerts ? (MAX_ROWS - 1) : MAX_ROWS;
@@ -618,10 +643,13 @@ static uint32_t computeContentHash(const char*    selectedStopId,
         bool isGone = false;
         // Reuse etaString from board_render.h — it is a static function in the
         // header so it is visible here (header included in main.cpp via board_render.h).
+        // v3.3.0 (Feature B): pass utc_offset so a far-future departure's hashed
+        // etaNum is the SAME clock-time string the board renders (e.g. "6:02a").
         etaString(dep_time, now_utc, cancelled,
                   etaNum,  sizeof(etaNum),
                   etaUnit, sizeof(etaUnit),
-                  &isGone);
+                  &isGone,
+                  utc_offset);
         if (isGone) continue;
 
         h = fnv1a_str(h, route);
@@ -1336,7 +1364,10 @@ void setup()
                 !doc["alerts"].is<JsonArray>()) {
                 Serial.printf("[NVS]  Cache parse error: %s\n",
                               err ? err.c_str() : "missing v3 fields");
-                drawNoDataScreen(display);
+                // v3.3.0 (Feature A): pass now_utc so the no-data screen shows the
+                // live "Updated H:MMam" line (offset defaults to AEST; utc_offset
+                // from JSON is not available on this error path).
+                drawNoDataScreen(display, now_utc);
                 prefs.end();
                 goToSleep();
                 return;
@@ -1346,7 +1377,7 @@ void setup()
             Serial.println("[NVS]  Rendering with STALE cached data");
         } else {
             Serial.println("[NVS]  No cached data — rendering no-data screen");
-            drawNoDataScreen(display);
+            drawNoDataScreen(display, now_utc);   // v3.3.0: live "Updated H:MMam" line
             prefs.end();
             goToSleep();
             return;
@@ -1468,7 +1499,7 @@ void setup()
     } else if (!found) {
         // Empty stops array — render no-data
         Serial.println("[STOP] No stops in JSON — rendering no-data screen");
-        drawNoDataScreen(display);
+        drawNoDataScreen(display, now_utc, utc_offset);   // v3.3.0: live "Updated H:MMam" line
         prefs.end();
         goToSleep();
         return;
@@ -1493,6 +1524,9 @@ void setup()
 #endif
 
     // ---- 14. Content hash — Feature 1a (change-skip) ----------------------
+    // v3.3.0 (Feature A): utc_offset is now passed so the hash includes the
+    // current LOCAL minute — each new minute counts as "changed" and forces a
+    // redraw so the live "Updated H:MMam" footer line ticks (sign looks alive).
     uint32_t newHash = computeContentHash(
         selectedStopId,
         selectedDeps,
@@ -1500,7 +1534,8 @@ void setup()
         now_utc,
         hasAlerts,
         stale,
-        batteryPct
+        batteryPct,
+        utc_offset
     );
 
     uint32_t lastHash = prefs.getULong("last_hash", 0xFFFFFFFFUL);
@@ -1572,7 +1607,7 @@ void setup()
                 if (cachedJson.length() == 0) {
                     // No cache available — cannot render anything safe.
                     Serial.println("[OTA]  No cached JSON after OTA failure — no-data screen");
-                    drawNoDataScreen(display);
+                    drawNoDataScreen(display, now_utc, utc_offset);   // v3.3.0: live "Updated H:MMam"
                     prefs.end();
                     goToSleep();
                     return;
@@ -1583,7 +1618,7 @@ void setup()
                     !doc["stops"].is<JsonArray>() || !doc["alerts"].is<JsonArray>()) {
                     Serial.printf("[OTA]  Cache re-parse failed: %s — no-data screen\n",
                                   reParseErr ? reParseErr.c_str() : "missing v3 fields");
-                    drawNoDataScreen(display);
+                    drawNoDataScreen(display, now_utc, utc_offset);   // v3.3.0: live "Updated H:MMam"
                     prefs.end();
                     goToSleep();
                     return;
@@ -1610,17 +1645,18 @@ void setup()
                     selectedDeps      = first["departures"].as<JsonArray>();
                 } else if (!found) {
                     Serial.println("[OTA]  Cache re-parse: no stops — no-data screen");
-                    drawNoDataScreen(display);
+                    drawNoDataScreen(display, now_utc, utc_offset);   // v3.3.0: live "Updated H:MMam"
                     prefs.end();
                     goToSleep();
                     return;
                 }
-                // Re-hash with restored data
+                // Re-hash with restored data (v3.3.0: pass utc_offset for the
+                // local-minute tick term, matching the primary hash above).
                 newHash = computeContentHash(
                     selectedStopId,
                     selectedDeps,
                     alertsArr,
-                    now_utc, hasAlerts, stale, batteryPct);
+                    now_utc, hasAlerts, stale, batteryPct, utc_offset);
                 contentChanged = (newHash != lastHash);
             }
         }
