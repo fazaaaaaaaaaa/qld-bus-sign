@@ -27,6 +27,7 @@
   .note { background: #1f2630; border: 1px solid #30363d; border-radius: 10px; padding: 12px 14px; font-size: 14px; color: #c9d1d9; margin-top: 14px; }
   .ok { color: #3fb950; } .warn { color: #d29922; }
   code { background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 1px 6px; font-size: 13px; }
+  pre { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 10px 12px; margin: 10px 0; overflow-x: auto; font-size: 12.5px; line-height: 1.5; color: #c9d1d9; white-space: pre-wrap; word-break: break-word; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
   .unsupported { display: none; background: #2d2118; border: 1px solid #5a4626; color: #e3b341; border-radius: 10px; padding: 12px 14px; font-size: 14px; }
   a { color: #58a6ff; }
   footer { margin-top: 24px; color: #6e7681; font-size: 12.5px; text-align: center; }
@@ -46,6 +47,17 @@
       <li>No microSD card is needed — leave it out. The firmware lives on the internal flash.</li>
     </ol>
 
+    <h2>Step 1 — Back up the stock firmware (recommended)</h2>
+    <div class="note">
+      Installing <strong>erases</strong> the X4's original reader firmware, and the web installer can't read flash — so this backup is your <strong>only</strong> way back to stock. Do it once from a terminal (needs Python):
+      <pre>pip install esptool
+esptool.py --chip esp32c3 --baud 921600 read_flash 0x0 0x1000000 x4-stock-backup.bin</pre>
+      That saves the full 16&nbsp;MB flash to <code>x4-stock-backup.bin</code> (~3&nbsp;min) — keep it somewhere safe. To return the X4 to stock later:
+      <pre>esptool.py --chip esp32c3 write_flash 0x0 x4-stock-backup.bin</pre>
+      You <em>can</em> skip this, but there is no undo without it.
+    </div>
+
+    <h2>Step 2 — Install the bus-sign firmware</h2>
     <div class="btnwrap">
       <esp-web-install-button manifest="./manifest.json">
         <button slot="activate" style="font-size:16px;padding:12px 22px;border-radius:10px;border:0;background:#fff;color:#0d1117;font-weight:600;cursor:pointer;">⚡ Connect &amp; Install</button>
