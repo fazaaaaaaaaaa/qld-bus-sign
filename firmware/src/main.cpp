@@ -486,19 +486,15 @@ static ButtonId readButton()
 //   enabled alongside, so the normal REFRESH_MINUTES schedule is untouched.
 static void armButtonWakeup()
 {
-    // Build a bit mask of the wake pins (BIT(gpio)).
-    const uint64_t wakeMask = (1ULL << BTN_ADC_LEFT_PIN) |   // GPIO1 ladder (LEFT/RIGHT/Back/Confirm)
-                              (1ULL << BTN_POWER_PIN);        // GPIO3 power button
-
-    // Low-level wake: idle pads rest HIGH, a press drives them LOW.
-    esp_err_t werr = esp_deep_sleep_enable_gpio_wakeup(wakeMask, ESP_GPIO_WAKEUP_GPIO_LOW);
-    if (werr == ESP_OK) {
-        Serial.println("[BTN] Deep-sleep GPIO wake armed (GPIO1 ladder + GPIO3 power, LOW)");
-    } else {
-        // Non-fatal: timer wake still fires, so the sign keeps updating on schedule.
-        Serial.printf("[BTN] GPIO wake arm failed (err=%d) — timer wake still active\n",
-                      (int)werr);
-    }
+    // v3.2.1: deep-sleep GPIO button wake is DISABLED for stability.
+    // On the real X4 unit the GPIO1 ladder idle level / ADC thresholds did not
+    // match the CircuitPython reference values, so a LOW-level wake on GPIO1
+    // fired spuriously (and the post-render poll saw phantom presses) — which
+    // made the device restart-loop into the WiFi portal.  Until the buttons are
+    // calibrated on-device (watch the "[BTN] adc1=.. adc2=.." serial readout and
+    // report the values), we wake on the TIMER only, exactly like the stable
+    // v3.1 — so the sign cannot loop.  No GPIO wake is armed here on purpose.
+    (void)0;
 }
 
 // =============================================================================
