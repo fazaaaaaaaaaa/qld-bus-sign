@@ -77,7 +77,7 @@ const CONFIG = {
 
   /** GTFS-RT ServiceAlerts protobuf endpoint. */
   RT_SERVICE_ALERTS_URL: Deno.env.get("RT_SERVICE_ALERTS_URL") ??
-    "https://gtfsrt.api.translink.com.au/api/realtime/SEQ/ServiceAlerts",
+    "https://gtfsrt.api.translink.com.au/api/realtime/SEQ/Alerts",
 
   /** OTA firmware manifest URL (JSON {version,bin_url,sha256}). Empty = omit firmware block. */
   FIRMWARE_MANIFEST_URL: Deno.env.get("FIRMWARE_MANIFEST_URL") ??
