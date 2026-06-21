@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-selftest.py — OFFLINE self-test for the cloud backend.
+selftest.py — OFFLINE self-test for the cloud backend (Data Contract v3).
 
-Feeds a small FAKE stop_schedule + FAKE realtime overlay through the same code
-paths that build_departures() uses, writes a sample public/departures.json,
-and asserts the Data Contract v2 is met.
+Feeds a small FAKE stop_schedule (v3 multi-stop shape) + FAKE realtime overlay
+through the same code paths that build_stop_departures() uses, writes a sample
+public/departures.json, and asserts the Data Contract v3 is met.
 
 NO NETWORK ACCESS IS REQUIRED.
 
@@ -28,7 +28,7 @@ HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
 
 from update_departures import (
-    build_departures,
+    build_stop_departures,
     _get_tz,
     _now_local,
     _local_to_epoch,
@@ -52,8 +52,7 @@ def check(name: str, condition: bool, detail: str = "") -> None:
 
 
 # ---------------------------------------------------------------------------
-# Build a FAKE stop_schedule that mimics the real structure.
-# Uses TODAY's date so the calendar check passes.
+# Time / timezone setup
 # ---------------------------------------------------------------------------
 
 tz_name = "Australia/Brisbane"
@@ -65,49 +64,92 @@ utc_offset = _utc_offset_seconds(tz_obj, now_utc.replace(tzinfo=None))
 
 today = now_local.date()
 today_str = today.strftime("%Y%m%d")
-# Weekday name for calendar
 _DAY_COLS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
 today_col = _DAY_COLS[today.weekday()]
 
-# Service that runs today via the regular calendar.
+# ---------------------------------------------------------------------------
+# Service IDs for calendar tests
+# ---------------------------------------------------------------------------
+
+# Runs today via regular calendar.
 SERVICE_A = "SVC_TODAY"
-# Service that runs today via a calendar_dates addition (no regular calendar entry).
+# Runs today via calendar_dates addition only.
 SERVICE_B = "SVC_ADDED_TODAY"
-# Service that is removed today via calendar_dates (should NOT appear).
+# Removed today via calendar_dates (must NOT appear).
 SERVICE_C = "SVC_REMOVED_TODAY"
 
-# Fake trips.
-TRIPS = {
-    "TRIP_001": {"route_id": "R412", "service_id": SERVICE_A, "headsign": "City Botanic Gardens"},
-    "TRIP_002": {"route_id": "R130", "service_id": SERVICE_A, "headsign": "Roma Street Station"},
-    "TRIP_003": {"route_id": "R66",  "service_id": SERVICE_B, "headsign": "Carindale"},
-    "TRIP_004": {"route_id": "R412", "service_id": SERVICE_C, "headsign": "Should Not Appear"},
-    "TRIP_005": {"route_id": "R412", "service_id": SERVICE_A, "headsign": "City Botanic Gardens"},
-}
+# ---------------------------------------------------------------------------
+# Fake v3 stop_schedule.json — two-stop shape (§B)
+# ---------------------------------------------------------------------------
 
-ROUTES = {
-    "R412": "412",
-    "R130": "130",
-    "R66":  "66",
-}
-
-# Build departure times relative to now so they fall in the near future.
-# GTFS time = local HH:MM:SS on today's date.
 def _future_gtfs_time(minutes_from_now: int) -> str:
-    """Return a GTFS departure_time string for (now_local + minutes_from_now)."""
+    """Return a GTFS HH:MM:SS string for (now_local + minutes_from_now)."""
     dep = now_local + timedelta(minutes=minutes_from_now)
-    # GTFS time may represent hours >= 24 for post-midnight — here we stay same-day.
     return dep.strftime("%H:%M:%S")
 
-STOP_TIMES = [
-    {"trip_id": "TRIP_001", "stop_id": "600029", "departure_time": _future_gtfs_time(3),  "stop_sequence": 5},
-    {"trip_id": "TRIP_002", "stop_id": "600029", "departure_time": _future_gtfs_time(8),  "stop_sequence": 3},
-    {"trip_id": "TRIP_003", "stop_id": "600029", "departure_time": _future_gtfs_time(12), "stop_sequence": 7},
-    {"trip_id": "TRIP_004", "stop_id": "600029", "departure_time": _future_gtfs_time(2),  "stop_sequence": 2},  # should be excluded
-    {"trip_id": "TRIP_005", "stop_id": "600029", "departure_time": _future_gtfs_time(20), "stop_sequence": 5},
+
+# ---- Stop A — "011180" (Clayfield) ----------------------------------------
+STOP_A_GTFS_IDS = ["600029", "60029"]   # fake GTFS IDs for this logical stop
+
+TRIPS_A = [
+    # route 320, service A, future departure at +5 min
+    {
+        "trip_id": "TRIP_A01",
+        "route": "320",
+        "dest": "City",
+        "service_id": SERVICE_A,
+        "dep": _future_gtfs_time(5),
+    },
+    # route 320, service A, future departure at +15 min
+    {
+        "trip_id": "TRIP_A02",
+        "route": "320",
+        "dest": "City",
+        "service_id": SERVICE_A,
+        "dep": _future_gtfs_time(15),
+    },
+    # route 320, service B (added via calendar_dates), +20 min
+    {
+        "trip_id": "TRIP_A03",
+        "route": "320",
+        "dest": "City Botanic Gardens",
+        "service_id": SERVICE_B,
+        "dep": _future_gtfs_time(20),
+    },
+    # route 320, service C (removed via calendar_dates) — must NOT appear
+    {
+        "trip_id": "TRIP_A04",
+        "route": "320",
+        "dest": "Should Not Appear",
+        "service_id": SERVICE_C,
+        "dep": _future_gtfs_time(3),
+    },
 ]
 
-# Calendar: SERVICE_A runs today (and all week in a broad date range).
+# ---- Stop B — "24" (Adelaide St) ------------------------------------------
+STOP_B_GTFS_IDS = ["600001"]   # fake GTFS IDs
+
+TRIPS_B = [
+    # route 322, service A, +7 min — will get RT cancellation
+    {
+        "trip_id": "TRIP_B01",
+        "route": "322",
+        "dest": "Roma St",
+        "service_id": SERVICE_A,
+        "dep": _future_gtfs_time(7),
+    },
+    # route 320, service A, +12 min — will get RT live time (2 min earlier)
+    {
+        "trip_id": "TRIP_B02",
+        "route": "320",
+        "dest": "Queen St",
+        "service_id": SERVICE_A,
+        "dep": _future_gtfs_time(12),
+    },
+]
+
+# ---- Calendar ---------------------------------------------------------------
+
 CALENDAR = {
     SERVICE_A: {
         "monday": 1, "tuesday": 1, "wednesday": 1,
@@ -123,52 +165,77 @@ CALENDAR = {
     },
 }
 
-# calendar_dates: add SERVICE_B today, remove SERVICE_C today.
-CALENDAR_DATES = [
-    {"service_id": SERVICE_B, "date": today_str, "exception_type": 1},
-    {"service_id": SERVICE_C, "date": today_str, "exception_type": 2},
-]
+# v3 shape: dict keyed by service_id → list of {date, exception_type}
+CALENDAR_DATES = {
+    SERVICE_B: [{"date": today_str, "exception_type": 1}],
+    SERVICE_C: [{"date": today_str, "exception_type": 2}],
+}
+
+# ---- Full v3 fake schedule --------------------------------------------------
 
 FAKE_SCHEDULE = {
-    "_meta": {
-        "stop_ids": ["600029"],
-        "stop_label": "Queen St Bus Station, Stop A",
-        "built_at_epoch": now_epoch,
-        "gtfs_zip_url": "https://example.com/FAKE_GTFS.zip",
+    "version": 3,
+    "built_at": now_epoch,
+    "timezone": tz_name,
+    "stops": {
+        "011180": {
+            "label": "Bonney Ave at Victoria Parade, Stop 24, Clayfield",
+            "routes": ["320"],
+            "gtfs_stop_ids": STOP_A_GTFS_IDS,
+            "trips": TRIPS_A,
+        },
+        "24": {
+            "label": "Adelaide St, Stop 24 near Edward St",
+            "routes": ["320", "322"],
+            "gtfs_stop_ids": STOP_B_GTFS_IDS,
+            "trips": TRIPS_B,
+        },
     },
-    "routes": ROUTES,
     "calendar": CALENDAR,
     "calendar_dates": CALENDAR_DATES,
-    "trips": TRIPS,
-    "stop_times": STOP_TIMES,
 }
+
+# ---------------------------------------------------------------------------
+# Fake config
+# ---------------------------------------------------------------------------
 
 CONFIG = {
-    "stop_ids": ["600029"],
-    "stop_label": "Queen St Bus Station, Stop A",
-    "max_rows": 8,
+    "stops": [
+        {
+            "key": "011180",
+            "label": "Bonney Ave at Victoria Parade, Stop 24, Clayfield",
+            "match_ids": ["011180", "11180"],
+            "routes": ["320"],
+        },
+        {
+            "key": "24",
+            "label": "Adelaide St, Stop 24 near Edward St",
+            "match_ids": ["24", "000024"],
+            "routes": ["320", "322"],
+        },
+    ],
+    "max_rows": 6,
     "timezone": tz_name,
-    "route_filter": [],
-    "rt_trip_updates_url": "",  # blank = no RT in selftest
-    "feed_timeout_seconds": 10,
 }
 
 # ---------------------------------------------------------------------------
-# Fake RT overlay: TRIP_002 gets a predicted departure 2 min earlier than
-# scheduled, TRIP_001 gets cancelled.
+# Fake RT overlay
 # ---------------------------------------------------------------------------
-TRIP_002_RT_EPOCH = int(_local_to_epoch(now_local + timedelta(minutes=6), tz_obj))
+
+# TRIP_B01 (route 322) — cancelled.
+# TRIP_B02 (route 320 at Stop B) — gets a live time 2 min earlier.
+TRIP_B02_RT_EPOCH = int(_local_to_epoch(now_local + timedelta(minutes=10), tz_obj))
 
 FAKE_RT: dict = {
-    "TRIP_001": {
+    "TRIP_B01": {
         "cancelled": True,
         "stops": {},
     },
-    "TRIP_002": {
+    "TRIP_B02": {
         "cancelled": False,
         "stops": {
-            "600029": {
-                "departure_epoch": float(TRIP_002_RT_EPOCH),
+            STOP_B_GTFS_IDS[0]: {
+                "departure_epoch": float(TRIP_B02_RT_EPOCH),
                 "arrival_epoch": None,
                 "schedule_relationship": 0,
             }
@@ -177,12 +244,24 @@ FAKE_RT: dict = {
 }
 
 # ---------------------------------------------------------------------------
-# Run build_departures
+# Unit-test _active_services_for_date with v3 calendar_dates (dict shape)
+# ---------------------------------------------------------------------------
+# This directly validates the v3→v3 seam: build_schedule.py emits calendar_dates
+# as a DICT keyed by service_id, and update_departures.py (via _active_services_for_date)
+# must read it the same way.  Deno's activeServicesForDate uses Object.entries() on the same shape.
+
+_active_svcs_today = _active_services_for_date(FAKE_SCHEDULE, today)
+assert SERVICE_A in _active_svcs_today, f"SERVICE_A should be active today (regular calendar); got {_active_svcs_today}"
+assert SERVICE_B in _active_svcs_today, f"SERVICE_B should be active today (calendar_dates addition); got {_active_svcs_today}"
+assert SERVICE_C not in _active_svcs_today, f"SERVICE_C should be removed today (calendar_dates removal); got {_active_svcs_today}"
+
+# ---------------------------------------------------------------------------
+# Run build_stop_departures for both stops
 # ---------------------------------------------------------------------------
 
 print()
 print("=" * 60)
-print("QLD Bus Sign Cloud Backend — selftest")
+print("QLD Bus Sign Cloud Backend — selftest v3")
 print("=" * 60)
 print(f"  Now local : {now_local.isoformat()}")
 print(f"  Now epoch : {now_epoch}")
@@ -190,21 +269,41 @@ print(f"  UTC offset: {utc_offset}s ({utc_offset//3600:+d}h)")
 print(f"  Today     : {today_str} ({today_col})")
 print()
 
-deps = build_departures(
-    schedule=FAKE_SCHEDULE,
-    rt_map=FAKE_RT,
-    now_local=now_local,
-    now_epoch=now_epoch,
-    tz_obj=tz_obj,
-    config=CONFIG,
-)
+max_rows = int(CONFIG["max_rows"])
+stops_out = []
+for stop_cfg in CONFIG["stops"]:
+    key = stop_cfg["key"]
+    label = stop_cfg["label"]
+    stop_entry = FAKE_SCHEDULE["stops"][key]
+    deps = build_stop_departures(
+        stop_entry=stop_entry,
+        rt_map=FAKE_RT,
+        now_local=now_local,
+        now_epoch=now_epoch,
+        tz_obj=tz_obj,
+        max_rows=max_rows,
+        schedule=FAKE_SCHEDULE,
+    )
+    stops_out.append({"stop_id": key, "stop_label": label, "departures": deps})
 
-# Build the full output contract.
+# Fake alerts and firmware for contract completeness.
+FAKE_ALERTS = [
+    {
+        "id": "alert_test_1",
+        "header": "Route 322 detouring via Ann St",
+        "severity": "WARNING",
+        "effect": "DETOUR",
+        "routes": ["322"],
+    }
+]
+
 output = {
-    "stop_label": CONFIG["stop_label"],
+    "version": 3,
     "generated_at": now_epoch,
     "utc_offset_seconds": utc_offset,
-    "departures": deps,
+    "alerts": FAKE_ALERTS,
+    "stops": stops_out,
+    # firmware key omitted (testing optional-omit path)
 }
 
 # Write sample departures.json.
@@ -222,89 +321,155 @@ print()
 
 print("Assertions:")
 
-# 1. Valid JSON (we just wrote it, but re-parse to confirm).
+# Re-parse from disk to simulate consumer reading the file.
 with open(out_path, encoding="utf-8") as f:
     parsed = json.load(f)
-check("valid JSON", True)
+check("valid JSON (re-parsed from disk)", True)
 
-# 2. Required top-level keys.
-for key in ("stop_label", "generated_at", "utc_offset_seconds", "departures"):
+# --- Top-level v3 required keys ---
+for key in ("version", "generated_at", "utc_offset_seconds", "alerts", "stops"):
     check(f"top-level key '{key}' present", key in parsed)
 
-# 3. generated_at is an integer.
-check("generated_at is int", isinstance(parsed["generated_at"], int),
-      f"got {type(parsed['generated_at'])}")
+check("version == 3", parsed.get("version") == 3, f"got {parsed.get('version')!r}")
+check("generated_at is int", isinstance(parsed.get("generated_at"), int),
+      f"got {type(parsed.get('generated_at'))}")
+check("utc_offset_seconds is int", isinstance(parsed.get("utc_offset_seconds"), int))
+check("utc_offset_seconds == 36000 (Brisbane +10h)", parsed.get("utc_offset_seconds") == 36000,
+      f"got {parsed.get('utc_offset_seconds')}")
 
-# 4. utc_offset_seconds is an integer and plausible for Brisbane.
-check("utc_offset_seconds is int", isinstance(parsed["utc_offset_seconds"], int))
-check("utc_offset_seconds == 36000 (Brisbane +10h)", parsed["utc_offset_seconds"] == 36000,
-      f"got {parsed['utc_offset_seconds']}")
+# --- alerts ---
+check("alerts is a list", isinstance(parsed.get("alerts"), list),
+      f"got {type(parsed.get('alerts'))}")
+if isinstance(parsed.get("alerts"), list) and parsed["alerts"]:
+    a0 = parsed["alerts"][0]
+    for ak in ("id", "header", "severity", "effect", "routes"):
+        check(f"alerts[0] has field '{ak}'", ak in a0)
+    check("alerts[0].routes is a list", isinstance(a0.get("routes"), list))
+    check("alerts[0].header len <= 96", len(a0.get("header", "")) <= 96,
+          f"len={len(a0.get('header', ''))}")
+    # All alerts must have a non-empty header (cross-backend consistency: Deno skips
+    # empty-header alerts; Python must do the same so both backends produce the same output).
+    for ai, alert in enumerate(parsed["alerts"]):
+        check(f"alerts[{ai}].header is non-empty str (empty-header skip parity with Deno)",
+              isinstance(alert.get("header"), str) and len(alert["header"]) > 0,
+              f"got {alert.get('header')!r}")
 
-# 5. departures is a list.
-check("departures is list", isinstance(parsed["departures"], list))
+# --- firmware key absent when not published ---
+check("firmware key absent (not published in this test)", "firmware" not in parsed)
 
-# 6. len <= max_rows.
-check(f"len(departures) <= max_rows ({CONFIG['max_rows']})",
-      len(parsed["departures"]) <= CONFIG["max_rows"],
-      f"got {len(parsed['departures'])}")
+# --- stops array ---
+check("stops is a list", isinstance(parsed.get("stops"), list))
+check(f"stops has {len(CONFIG['stops'])} entries (all configured stops emitted)",
+      len(parsed.get("stops", [])) == len(CONFIG["stops"]),
+      f"got {len(parsed.get('stops', []))}")
 
-# 7. Each departure has required fields with correct types.
+# Stop order must match config order.
+expected_keys = [s["key"] for s in CONFIG["stops"]]
+actual_keys   = [s.get("stop_id") for s in parsed.get("stops", [])]
+check("stops[] order matches config order", actual_keys == expected_keys,
+      f"expected {expected_keys}, got {actual_keys}")
+
+# Per-stop checks.
 required_dep_keys = {"route": str, "dest": str, "time": int, "live": bool, "cancelled": bool}
-for i, dep in enumerate(parsed["departures"]):
-    for k, t in required_dep_keys.items():
-        check(f"dep[{i}] '{k}' is {t.__name__}",
-              k in dep and isinstance(dep[k], t),
-              f"got {dep.get(k)!r} ({type(dep.get(k)).__name__})")
+for i, stop in enumerate(parsed.get("stops", [])):
+    check(f"stops[{i}] has stop_id", "stop_id" in stop)
+    check(f"stops[{i}] has stop_label", "stop_label" in stop)
+    check(f"stops[{i}] has departures list", isinstance(stop.get("departures"), list))
+    # stop_id must be the stable key from config, not a GTFS id.
+    expected_key = CONFIG["stops"][i]["key"] if i < len(CONFIG["stops"]) else None
+    check(f"stops[{i}].stop_id == config key {expected_key!r}",
+          stop.get("stop_id") == expected_key, f"got {stop.get('stop_id')!r}")
+    # stop_label must be non-empty.
+    check(f"stops[{i}].stop_label is non-empty str",
+          isinstance(stop.get("stop_label"), str) and len(stop["stop_label"]) > 0,
+          f"got {stop.get('stop_label')!r}")
 
-# 8. Times are absolute epoch integers (not relative minutes).
-for i, dep in enumerate(parsed["departures"]):
-    t = dep.get("time", 0)
-    # A valid epoch for 2020–2040 is between ~1577836800 and ~2208988800.
-    check(f"dep[{i}] time looks like epoch (>= 1_500_000_000)",
-          isinstance(t, int) and t >= 1_500_000_000,
-          f"got {t}")
+    deps = stop.get("departures", [])
+    check(f"stops[{i}] len(departures) <= max_rows ({max_rows})",
+          len(deps) <= max_rows, f"got {len(deps)}")
 
-# 9. Sorted ascending by time.
-times = [dep["time"] for dep in parsed["departures"]]
-check("departures sorted ascending by time",
-      times == sorted(times),
-      f"times={times}")
+    times = [d["time"] for d in deps]
+    check(f"stops[{i}] departures sorted ascending",
+          times == sorted(times), f"times={times}")
 
-# 10. route <= 6 chars, dest <= 28 chars (with ellipsis headroom).
-for i, dep in enumerate(parsed["departures"]):
-    check(f"dep[{i}] route len <= 6", len(dep.get("route", "")) <= 6, dep.get("route"))
-    check(f"dep[{i}] dest len <= 29", len(dep.get("dest", "")) <= 29, dep.get("dest"))
+    for j, dep in enumerate(deps):
+        for k, t in required_dep_keys.items():
+            check(f"stops[{i}].departures[{j}] '{k}' is {t.__name__}",
+                  k in dep and isinstance(dep[k], t),
+                  f"got {dep.get(k)!r} ({type(dep.get(k)).__name__})")
+        t_val = dep.get("time", 0)
+        check(f"stops[{i}].departures[{j}] time looks like epoch (>= 1_500_000_000)",
+              isinstance(t_val, int) and t_val >= 1_500_000_000, f"got {t_val}")
+        check(f"stops[{i}].departures[{j}] route len <= 6",
+              len(dep.get("route", "")) <= 6, dep.get("route"))
+        check(f"stops[{i}].departures[{j}] dest len <= 29",
+              len(dep.get("dest", "")) <= 29, dep.get("dest"))
 
-# 11. Verify RT overlay worked: TRIP_002 should have live=True and time == TRIP_002_RT_EPOCH.
-rt_dep = next((d for d in parsed["departures"] if d["route"] == "130"), None)
-check("TRIP_002 (route 130) present in output", rt_dep is not None)
-if rt_dep:
-    check("TRIP_002 live=True (RT overlay applied)", rt_dep["live"] is True, f"live={rt_dep['live']}")
-    check(f"TRIP_002 time == RT epoch ({TRIP_002_RT_EPOCH})",
-          rt_dep["time"] == TRIP_002_RT_EPOCH, f"time={rt_dep['time']}")
+# --- Stop A specific checks ---
+stop_a = next((s for s in parsed["stops"] if s["stop_id"] == "011180"), None)
+check("Stop 011180 present", stop_a is not None)
+if stop_a:
+    # TRIP_A04 (SERVICE_C, removed by calendar_dates) must NOT appear.
+    bad = next((d for d in stop_a["departures"] if d.get("dest") == "Should Not Appear"), None)
+    check("Stop 011180: TRIP_A04 (SERVICE_C removed) NOT in departures", bad is None,
+          "calendar_dates removal failed")
 
-# 12. Verify TRIP_001 (route 412, +3 min) is cancelled.
-cancelled_dep = next((d for d in parsed["departures"] if d["route"] == "412" and d["cancelled"]), None)
-check("TRIP_001 (route 412) present and cancelled=True (RT cancellation applied)",
-      cancelled_dep is not None)
+    # SERVICE_B (added via calendar_dates) must appear.
+    added = next((d for d in stop_a["departures"] if d.get("dest") == "City Botanic Gardens"), None)
+    check("Stop 011180: TRIP_A03 (SERVICE_B added) IS in departures", added is not None)
 
-# 13. Verify SERVICE_C trip was removed (TRIP_004 route 412 headsign "Should Not Appear").
-bad_dep = next((d for d in parsed["departures"] if d.get("dest") == "Should Not Appear"), None)
-check("TRIP_004 (SERVICE_C removed by calendar_dates) NOT in output", bad_dep is None,
-      "calendar_dates removal failed")
+# --- Stop B specific checks ---
+stop_b = next((s for s in parsed["stops"] if s["stop_id"] == "24"), None)
+check("Stop 24 present", stop_b is not None)
+if stop_b:
+    # TRIP_B01 (route 322) should be present and cancelled.
+    cancelled_dep = next((d for d in stop_b["departures"] if d["route"] == "322" and d["cancelled"]), None)
+    check("Stop 24: TRIP_B01 (route 322) present and cancelled=True", cancelled_dep is not None)
 
-# 14. Verify SERVICE_B (added via calendar_dates) trip IS present (route 66).
-added_dep = next((d for d in parsed["departures"] if d["route"] == "66"), None)
-check("TRIP_003 (SERVICE_B added by calendar_dates) IS in output", added_dep is not None)
+    # TRIP_B02 (route 320) should have live=True and RT epoch.
+    rt_dep = next((d for d in stop_b["departures"] if d["route"] == "320"), None)
+    check("Stop 24: TRIP_B02 (route 320) present", rt_dep is not None)
+    if rt_dep:
+        check("Stop 24: TRIP_B02 live=True (RT overlay applied)",
+              rt_dep["live"] is True, f"live={rt_dep['live']}")
+        check(f"Stop 24: TRIP_B02 time == RT epoch ({TRIP_B02_RT_EPOCH})",
+              rt_dep["time"] == TRIP_B02_RT_EPOCH, f"time={rt_dep['time']}")
 
-# 15. Consumer simulation: compute minutes from absolute epoch.
+# ---------------------------------------------------------------------------
+# Consumer simulation
+# ---------------------------------------------------------------------------
+
 print()
 print("Consumer minutes-from-now simulation:")
-for dep in parsed["departures"]:
-    mins_from_now = (dep["time"] - now_epoch) // 60
-    marker = "LIVE" if dep["live"] else "sched"
-    cncl = " CANCELLED" if dep["cancelled"] else ""
-    print(f"  Route {dep['route']:<6}  {dep['dest']:<30}  {mins_from_now:+4d} min  [{marker}]{cncl}")
+for stop in parsed["stops"]:
+    print(f"  -- {stop['stop_id']}: {stop['stop_label']} --")
+    for dep in stop["departures"]:
+        mins_from_now = (dep["time"] - now_epoch) // 60
+        marker = "LIVE" if dep["live"] else "sched"
+        cncl = " CANCELLED" if dep["cancelled"] else ""
+        print(f"    Route {dep['route']:<6}  {dep['dest']:<30}  {mins_from_now:+4d} min  [{marker}]{cncl}")
+
+# ---------------------------------------------------------------------------
+# Firmware optional-block test
+# ---------------------------------------------------------------------------
+
+print()
+print("Firmware optional-block test (firmware key omitted when not published):")
+firmware_present = "firmware" in parsed
+check("firmware key correctly absent in this test run", not firmware_present)
+
+# Simulate a firmware block being present and validate its shape.
+fake_fw_output = dict(output)
+fake_fw_output["firmware"] = {
+    "version": "1.3.0",
+    "bin_url": "https://fazaaaaaaaaaa.github.io/qld-bus-sign/firmware.bin",
+    "sha256": "a" * 64,
+}
+for fk in ("version", "bin_url", "sha256"):
+    check(f"firmware block field '{fk}' valid",
+          fk in fake_fw_output["firmware"] and isinstance(fake_fw_output["firmware"][fk], str))
+check("firmware sha256 is 64 hex chars",
+      len(fake_fw_output["firmware"]["sha256"]) == 64)
 
 # ---------------------------------------------------------------------------
 # Summary

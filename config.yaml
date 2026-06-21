@@ -1,5 +1,5 @@
 # ============================================================
-# QLD Bus Departure Sign — Cloud Backend Configuration
+# QLD Bus Departure Sign — Cloud Backend Configuration (v3)
 # ============================================================
 # This file is used by build_schedule.py and update_departures.py.
 # Edit the values below, then:
@@ -7,51 +7,65 @@
 #   2. Commit everything and push — GitHub Actions handles the rest.
 # ============================================================
 
-# ---- Stop IDs -------------------------------------------------
-# One or more Translink stop IDs to monitor.
-# How to find your stop_id:
-#   Option A: Go to https://jp.translink.com.au, search for your stop.
-#             The stop_id appears in the URL or the stop detail page.
+# ---- Stops (multi-stop, Data Contract v3) ----------------------
+# Each entry must have:
+#   key       — stable identifier emitted in departures.json "stop_id" field.
+#               Firmware selects the displayed stop by matching this value.
+#   label     — human-readable display name (shown in the sign header).
+#   match_ids — list of IDs to match against stops.txt.
+#               build_schedule.py checks BOTH stop_id == id AND stop_code == id
+#               for each entry, so you can list the numeric GTFS stop_id and/or
+#               the public stop code and the resolver handles either form.
+#   routes    — route_short_name filter; only services with these routes are
+#               included for this stop. Leave empty to show all routes.
+#
+# How to find your stop IDs:
+#   Option A: Go to https://jp.translink.com.au and search for your stop.
+#             The stop_id appears in the URL or stop detail page.
 #   Option B: Download the static GTFS zip (see gtfs_static_zip_url below),
-#             open stops.txt, and search for your stop name.
-#             The first column (stop_id) is what you need here.
-#   Option C: Use the Translink GTFS API explorer at
-#             https://www.data.qld.gov.au/dataset/general-transit-feed-specification-gtfs-seq
-# Example SEQ stop IDs (replace with your own):
-#   600029  = Queen St Bus Station, Stop A
-#   600030  = Queen St Bus Station, Stop B
-stop_ids:
-  - "24"           # GTFS stop_id for Adelaide St Stop 24 near Edward St (public stop code is 000024)
-  - "000024"       # fallback (public stop-code form), harmless if it matches nothing
-
-# ---- Route filter (optional) ----------------------------------
-# If non-empty, only services with these route_short_names are shown.
-# Leave empty (or comment out) to show ALL routes serving your stops.
-# Examples: "130", "412", "66"
-route_filter:
-  - "320"
-  - "322"
+#             open stops.txt, and search for your stop name.  stop_id is column 1,
+#             stop_code is column 2.
+#   Option C: Use the data.qld.gov.au GTFS SEQ dataset explorer.
+stops:
+  - key: "011180"
+    label: "Bonney Ave at Victoria Parade, Stop 24, Clayfield"
+    match_ids: ["011180", "11180"]   # matched against stop_id OR stop_code in stops.txt
+    routes: ["320"]
+  - key: "24"
+    label: "Adelaide St, Stop 24 near Edward St"
+    match_ids: ["24", "000024"]      # matched against stop_id OR stop_code in stops.txt
+    routes: ["320", "322"]
 
 # ---- Display --------------------------------------------------
-# Text shown in the header of the sign (max ~28 chars for readability).
-stop_label: "Adelaide St, Stop 24 near Edward St"
+# Maximum departure rows emitted per stop in departures.json.
+max_rows: 6
 
-# Maximum departure rows in the JSON (firmware uses this; default 8).
-max_rows: 7
-
-# Timezone for departure times. Must be a TZ database name.
-# Brisbane has no DST, so utc_offset_seconds will always be 36000.
+# Timezone for all local-time calculations.
+# Brisbane has no DST, so utc_offset_seconds is always 36000.
 timezone: "Australia/Brisbane"
 
 # ---- GTFS Feed URLs -------------------------------------------
-# Real-time TripUpdates protobuf (GTFS-RT v2.0, public, no API key required).
-rt_trip_updates_url: "https://gtfsrt.api.translink.com.au/api/realtime/SEQ/TripUpdates"
-
 # Static GTFS schedule ZIP (~28 MB).
 # IMPORTANT: This URL sometimes changes. If it returns 404, check:
 #   https://www.data.qld.gov.au/dataset/general-transit-feed-specification-gtfs-seq
 # and copy the current download link for "GTFS - SEQ".
 gtfs_static_zip_url: "https://gtfsrt.api.translink.com.au/GTFS/SEQ_GTFS.zip"
+
+# Real-time TripUpdates protobuf (GTFS-RT v2.0, public, no API key required).
+rt_trip_updates_url: "https://gtfsrt.api.translink.com.au/api/realtime/SEQ/TripUpdates"
+
+# Real-time ServiceAlerts protobuf.
+# Any failure (HTTP error, timeout, parse error) → alerts: [] in departures.json.
+# On 404 the backend logs a warning and continues — departures are never blocked.
+rt_service_alerts_url: "https://gtfsrt.api.translink.com.au/api/realtime/SEQ/ServiceAlerts"
+
+# ---- OTA Firmware (optional) -----------------------------------
+# If firmware_manifest_url is non-empty, update_departures.py fetches it and
+# embeds {version, bin_url, sha256} as the "firmware" block in departures.json.
+# Leave empty to omit the firmware block entirely (safe default).
+# Alternatively, place cloud/public_assets/firmware.json on-disk (written by the
+# build-firmware workflow) and it will be read as a fallback when this is empty.
+firmware_manifest_url: ""
 
 # ---- Timeouts -------------------------------------------------
 # Timeout (seconds) for network requests to Translink feeds.

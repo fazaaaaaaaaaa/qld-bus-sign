@@ -3,28 +3,45 @@
 update_departures.py — Frequent job (runs every 5 min via GitHub Actions).
 
 Loads stop_schedule.json (precomputed by build_schedule.py), determines which
-trips run today, fetches GTFS-RT TripUpdates, merges them, and writes
-cloud/public/departures.json conforming to the Data Contract v2.
+trips run today per stop, fetches GTFS-RT TripUpdates, fetches GTFS-RT
+ServiceAlerts, merges them, and writes cloud/public/departures.json conforming
+to Data Contract v3.
 
 The job NEVER hard-fails on a transient feed error — if RT is unavailable,
 scheduled-only data (live=false) is emitted and the process exits 0 so the
-sign keeps showing something useful.
+sign keeps showing something useful.  Alerts failures similarly degrade to
+alerts:[] rather than blocking the file.
 
-Data Contract v2 output shape:
+Data Contract v3 output shape:
 {
-  "stop_label": "...",
+  "version": 3,
   "generated_at": <epoch int>,
-  "utc_offset_seconds": <int>,
-  "departures": [
+  "utc_offset_seconds": 36000,
+  "alerts": [
     {
-      "route": "412",
-      "dest": "City Botanic Gardens",
-      "time": <epoch int>,
-      "live": <bool>,
-      "cancelled": <bool>
+      "id": "alert_123",
+      "header": "Route 322 detouring via Ann St",
+      "severity": "WARNING",
+      "effect": "DETOUR",
+      "routes": ["322"]
+    }
+  ],
+  "stops": [
+    {
+      "stop_id": "011180",
+      "stop_label": "Bonney Ave at Victoria Parade, Stop 24, Clayfield",
+      "departures": [
+        { "route": "320", "dest": "City", "time": <epoch int>,
+          "live": <bool>, "cancelled": <bool> }
+      ]
     },
     ...
-  ]
+  ],
+  "firmware": {                     // optional; omitted when not published
+    "version": "1.3.0",
+    "bin_url": "https://...",
+    "sha256": "<64 hex chars>"
+  }
 }
 """
 
@@ -139,48 +156,45 @@ def _local_to_epoch(naive_local: datetime, tz_obj) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Calendar helpers (mirrors server/gtfs_static.py logic)
+# Calendar helpers (mirrors build_schedule.py logic)
 # ---------------------------------------------------------------------------
 
 _DAY_COLS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
 
 
-def _is_service_active(schedule: dict, service_id: str, check_date: date) -> bool:
-    """Return True if service_id runs on check_date."""
-    date_str = check_date.strftime("%Y%m%d")
-    day_col = _DAY_COLS[check_date.weekday()]
-
-    # calendar_dates overrides first.
-    for cd in schedule.get("calendar_dates", []):
-        if cd["service_id"] == service_id and cd["date"] == date_str:
-            return cd["exception_type"] == 1  # 1=added, 2=removed
-
-    # Regular calendar.
-    cal = schedule.get("calendar", {}).get(service_id)
-    if not cal:
-        return False
-    runs = bool(cal.get(day_col, 0))
-    in_range = cal.get("start_date", "") <= date_str <= cal.get("end_date", "")
-    return runs and in_range
-
-
 def _active_services_for_date(schedule: dict, check_date: date) -> set:
-    """Return set of service_ids active on check_date."""
+    """Return set of service_ids active on check_date.
+
+    Works with both the v3 calendar_dates format (dict keyed by service_id)
+    and the legacy v2 list format, for safety.
+    """
     date_str = check_date.strftime("%Y%m%d")
     day_col = _DAY_COLS[check_date.weekday()]
 
     # Collect additions and removals from calendar_dates.
-    added = set()
-    removed = set()
-    for cd in schedule.get("calendar_dates", []):
-        if cd["date"] == date_str:
-            if cd["exception_type"] == 1:
-                added.add(cd["service_id"])
-            elif cd["exception_type"] == 2:
-                removed.add(cd["service_id"])
+    added: set = set()
+    removed: set = set()
+    raw_cd = schedule.get("calendar_dates", {})
+    if isinstance(raw_cd, dict):
+        # v3 shape: {service_id: [{date, exception_type}]}
+        for svc_id, entries in raw_cd.items():
+            for cd in entries:
+                if cd["date"] == date_str:
+                    if cd["exception_type"] == 1:
+                        added.add(svc_id)
+                    elif cd["exception_type"] == 2:
+                        removed.add(svc_id)
+    else:
+        # v2 shape (legacy): [{service_id, date, exception_type}]
+        for cd in raw_cd:
+            if cd["date"] == date_str:
+                if cd["exception_type"] == 1:
+                    added.add(cd["service_id"])
+                elif cd["exception_type"] == 2:
+                    removed.add(cd["service_id"])
 
     # Regular calendar services active that day.
-    regular = set()
+    regular: set = set()
     for svc_id, cal in schedule.get("calendar", {}).items():
         if (bool(cal.get(day_col, 0))
                 and cal.get("start_date", "") <= date_str <= cal.get("end_date", "")):
@@ -225,8 +239,7 @@ def _truncate(text: str, max_chars: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-# RT feed fetch (mirrors server/gtfs_realtime.py; bundled here so cloud/ is
-# standalone and does not depend on the server/ directory being present)
+# RT TripUpdates feed fetch
 # ---------------------------------------------------------------------------
 
 _TRIP_SR_CANCELED = 3
@@ -255,7 +268,7 @@ def _fetch_rt(url: str, timeout: int) -> dict:
         resp = requests.get(url, timeout=timeout)
         resp.raise_for_status()
     except Exception as exc:
-        log.warning("RT fetch failed (non-fatal): %s", exc)
+        log.warning("RT TripUpdates fetch failed (non-fatal): %s", exc)
         return {}
 
     try:
@@ -263,10 +276,10 @@ def _fetch_rt(url: str, timeout: int) -> dict:
         feed = gtfs_realtime_pb2.FeedMessage()
         feed.ParseFromString(resp.content)
     except Exception as exc:
-        log.warning("RT parse failed (non-fatal): %s", exc)
+        log.warning("RT TripUpdates parse failed (non-fatal): %s", exc)
         return {}
 
-    result = {}
+    result: dict = {}
     for entity in feed.entity:
         if not entity.HasField("trip_update"):
             continue
@@ -275,7 +288,7 @@ def _fetch_rt(url: str, timeout: int) -> dict:
         if not trip_id:
             continue
         is_cancelled = (tu.trip.schedule_relationship == _TRIP_SR_CANCELED)
-        stops = {}
+        stops: dict = {}
         for stu in tu.stop_time_update:
             sid = stu.stop_id
             if not sid:
@@ -294,36 +307,168 @@ def _fetch_rt(url: str, timeout: int) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Build departures
+# RT ServiceAlerts feed fetch
 # ---------------------------------------------------------------------------
 
-def build_departures(schedule: dict, rt_map: dict, now_local: datetime,
-                     now_epoch: int, tz_obj, config: dict) -> list:
-    """
-    Merge static schedule + realtime overlay into the Data Contract v2 list.
+# GTFS severity_level values (proto enum SeverityLevel).
+_SEVERITY_MAP = {
+    0: "UNKNOWN",
+    1: "INFO",
+    2: "WARNING",
+    3: "SEVERE",
+}
 
-    Returns list of departure dicts sorted ascending by "time" (epoch seconds).
-    """
-    max_rows = int(config.get("max_rows", 8))
-    route_filter = set(config.get("route_filter") or [])
-    stop_ids = set(str(s) for s in config.get("stop_ids", []))
+# Collect all configured routes across all stops (used for alert filtering).
+def _all_configured_routes(stops_config: list) -> set:
+    all_routes: set = set()
+    for s in stops_config:
+        for r in s.get("routes", []):
+            all_routes.add(str(r))
+    return all_routes
 
-    # Filter window: from (now - 60s) onward.
+
+def _all_configured_stop_keys(stops_config: list) -> set:
+    return set(s["key"] for s in stops_config)
+
+
+def _fetch_alerts(url: str, timeout: int, stops_config: list) -> list:
+    """
+    Fetch GTFS-RT ServiceAlerts and return a list of alert dicts in v3 shape.
+
+    An alert is kept only if at least one of its informed_entity entries
+    matches a configured route OR a configured stop key.
+
+    Returns [] on any failure (404, timeout, parse error, missing field, etc.).
+    Never raises.
+    """
+    if not url:
+        return []
+
+    all_routes = _all_configured_routes(stops_config)
+    all_stop_keys = _all_configured_stop_keys(stops_config)
+
+    try:
+        resp = requests.get(url, timeout=timeout)
+        resp.raise_for_status()
+    except Exception as exc:
+        log.warning("RT ServiceAlerts fetch failed (non-fatal): %s — alerts: []", exc)
+        return []
+
+    try:
+        from google.transit import gtfs_realtime_pb2
+        feed = gtfs_realtime_pb2.FeedMessage()
+        feed.ParseFromString(resp.content)
+    except Exception as exc:
+        log.warning("RT ServiceAlerts parse failed (non-fatal): %s — alerts: []", exc)
+        return []
+
+    alerts: list[dict] = []
+    try:
+        for entity in feed.entity:
+            if not entity.HasField("alert"):
+                continue
+            alert = entity.alert
+
+            # Determine which configured routes this alert touches.
+            matched_routes: list[str] = []
+            stop_match = False
+            for ie in alert.informed_entity:
+                r = ie.route_id.strip() if ie.route_id else ""
+                s = ie.stop_id.strip() if ie.stop_id else ""
+                if r and r in all_routes:
+                    if r not in matched_routes:
+                        matched_routes.append(r)
+                if s and s in all_stop_keys:
+                    stop_match = True
+
+            # Keep only if it's relevant to us.
+            if not matched_routes and not stop_match:
+                continue
+
+            # Header text: prefer English translation, fall back to first.
+            header = ""
+            try:
+                for trans in alert.header_text.translation:
+                    if not header or trans.language in ("en", "en-AU", "en-GB"):
+                        header = trans.text
+                        if trans.language in ("en", "en-AU", "en-GB"):
+                            break
+            except Exception:
+                pass
+            header = _ascii_fold(_truncate(header, 96))
+            # Skip alerts with no usable header text (matches Deno behaviour).
+            if not header:
+                continue
+
+            # Severity.
+            try:
+                severity = _SEVERITY_MAP.get(alert.severity_level, "UNKNOWN")
+            except Exception:
+                severity = "UNKNOWN"
+
+            # Effect: GTFS effect enum NAME.
+            # Try multiple approaches across protobuf API versions.
+            try:
+                effect_int = alert.effect
+                from google.transit import gtfs_realtime_pb2 as _pb2
+                try:
+                    # protobuf >= 4: use descriptor
+                    effect = _pb2.Alert.DESCRIPTOR.fields_by_name["effect"].enum_type.values_by_number[effect_int].name
+                except (KeyError, AttributeError):
+                    try:
+                        # protobuf 3: class method
+                        effect = _pb2.Alert.Effect.Name(effect_int)
+                    except Exception:
+                        effect = str(effect_int)
+            except Exception:
+                effect = "UNKNOWN_EFFECT"
+
+            alerts.append({
+                "id": entity.id,
+                "header": header,
+                "severity": severity,
+                "effect": effect,
+                "routes": matched_routes,
+            })
+    except Exception as exc:
+        log.warning("Unexpected error processing ServiceAlerts (non-fatal): %s — alerts: []", exc)
+        return []
+
+    log.info("Parsed %d relevant service alerts", len(alerts))
+    return alerts
+
+
+# ---------------------------------------------------------------------------
+# Build departures for a single stop (v3 stop entry from stop_schedule.json)
+# ---------------------------------------------------------------------------
+
+def build_stop_departures(stop_entry: dict, rt_map: dict, now_local: datetime,
+                          now_epoch: int, tz_obj, max_rows: int,
+                          schedule: dict) -> list:
+    """
+    Compute active departures for one stop using the v3 stop entry shape:
+    {
+      "label": "...",
+      "routes": ["320"],
+      "gtfs_stop_ids": ["011180", "11180"],   # GTFS stop_id values from stops.txt
+      "trips": [
+        { "trip_id": "...", "route": "320", "dest": "City",
+          "service_id": "...", "dep": "07:42:00" }
+      ]
+    }
+
+    gtfs_stop_ids is used to look up the correct StopTimeUpdate entry in the
+    RT TripUpdates feed — each entry's stop_id is the raw GTFS stop_id.
+
+    Returns a sorted, deduped, capped list of departure dicts.
+    """
     cutoff_epoch = now_epoch - 60
-
-    # Build lookup maps for speed.
-    routes = schedule.get("routes", {})   # route_id → route_short_name
-    trips = schedule.get("trips", {})     # trip_id → {route_id, service_id, headsign}
-
-    # Build a dict of stop_times by trip_id for quick lookup.
-    # stop_times_by_trip: trip_id → list of {stop_id, departure_time, stop_sequence}
-    stop_times_by_trip: dict[str, list] = {}
-    for st in schedule.get("stop_times", []):
-        stop_times_by_trip.setdefault(st["trip_id"], []).append(st)
-
-    # Determine today's date and yesterday's (for after-midnight services).
     today = now_local.date()
     dates_to_check = [today - timedelta(days=1), today]
+
+    trips_list = stop_entry.get("trips", [])
+    # GTFS stop_ids for this logical stop; used for RT overlay lookup.
+    gtfs_stop_ids: set = set(stop_entry.get("gtfs_stop_ids", []))
 
     raw: list[dict] = []
 
@@ -332,77 +477,132 @@ def build_departures(schedule: dict, rt_map: dict, now_local: datetime,
         if not active_services:
             continue
 
-        for trip_id, trip in trips.items():
+        for trip in trips_list:
             if trip["service_id"] not in active_services:
                 continue
 
-            route_id = trip["route_id"]
-            route_short = routes.get(route_id, route_id)
-            headsign = trip.get("headsign", "")
+            route_short = trip.get("route", "")
+            headsign = trip.get("dest", "")
+            trip_id = trip["trip_id"]
+            dep_time_str = trip.get("dep", "")
 
-            if route_filter and route_short not in route_filter:
+            if not dep_time_str:
                 continue
 
-            for st in stop_times_by_trip.get(trip_id, []):
-                if st["stop_id"] not in stop_ids:
-                    continue
-                dep_time_str = st.get("departure_time", "")
-                if not dep_time_str:
-                    continue
-                try:
-                    sched_dt = _parse_gtfs_time(dep_time_str, check_date)
-                except Exception:
-                    continue
+            try:
+                sched_dt = _parse_gtfs_time(dep_time_str, check_date)
+            except Exception:
+                continue
 
-                # Convert scheduled datetime to epoch.
-                sched_epoch = _local_to_epoch(sched_dt, tz_obj)
+            sched_epoch = _local_to_epoch(sched_dt, tz_obj)
 
-                # Apply RT overlay.
-                cancelled = False
-                live = False
-                dep_epoch = sched_epoch
+            # Apply RT overlay.
+            cancelled = False
+            live = False
+            dep_epoch = sched_epoch
 
-                rt_trip = rt_map.get(trip_id)
-                if rt_trip:
-                    if rt_trip["cancelled"]:
-                        cancelled = True
-                    else:
-                        rt_stop = rt_trip["stops"].get(st["stop_id"])
-                        if rt_stop:
-                            rt_dep = rt_stop.get("departure_epoch") or rt_stop.get("arrival_epoch")
-                            if rt_dep:
-                                dep_epoch = int(rt_dep)
-                                live = True
-                            if rt_stop.get("schedule_relationship") == _STOP_SR_SKIPPED:
-                                cancelled = True
+            rt_trip = rt_map.get(trip_id)
+            if rt_trip:
+                if rt_trip["cancelled"]:
+                    cancelled = True
+                else:
+                    # Find the StopTimeUpdate entry for this stop.
+                    # Look up by each known GTFS stop_id for this logical stop.
+                    rt_stop = None
+                    for gs_id in gtfs_stop_ids:
+                        if gs_id in rt_trip["stops"]:
+                            rt_stop = rt_trip["stops"][gs_id]
+                            break
+                    # If gtfs_stop_ids is unknown/empty, fall back to any entry
+                    # that provides a departure time (graceful degradation).
+                    if rt_stop is None and not gtfs_stop_ids:
+                        for s_data in rt_trip["stops"].values():
+                            if s_data.get("departure_epoch") or s_data.get("arrival_epoch"):
+                                rt_stop = s_data
+                                break
+                    if rt_stop:
+                        rt_dep = rt_stop.get("departure_epoch") or rt_stop.get("arrival_epoch")
+                        if rt_dep:
+                            dep_epoch = int(rt_dep)
+                            live = True
+                        if rt_stop.get("schedule_relationship") == _STOP_SR_SKIPPED:
+                            cancelled = True
 
-                # Apply cutoff.
-                if dep_epoch < cutoff_epoch:
-                    continue
+            if dep_epoch < cutoff_epoch:
+                continue
 
-                dest = _ascii_fold(_truncate(headsign, 28))
-                raw.append({
-                    "route": _truncate(route_short, 6),
-                    "dest": dest,
-                    "time": dep_epoch,
-                    "live": live,
-                    "cancelled": cancelled,
-                })
+            dest = _ascii_fold(_truncate(headsign, 28))
+            raw.append({
+                "route": _truncate(route_short, 6),
+                "dest": dest,
+                "time": dep_epoch,
+                "live": live,
+                "cancelled": cancelled,
+            })
 
     # Sort ascending by time, deduplicate, keep max_rows.
     raw.sort(key=lambda x: x["time"])
-
-    # Deduplicate: same trip can appear via both check_dates — use (trip_id, stop_id) key is
-    # unavailable here, but same (route, dest, time) is effectively unique.
-    seen = set()
-    deduped = []
+    seen: set = set()
+    deduped: list = []
     for d in raw:
-        key = (d["route"], d["dest"], d["time"])
-        if key not in seen:
-            seen.add(key)
+        k = (d["route"], d["dest"], d["time"])
+        if k not in seen:
+            seen.add(k)
             deduped.append(d)
 
     return deduped[:max_rows]
+
+
+# ---------------------------------------------------------------------------
+# Firmware block
+# ---------------------------------------------------------------------------
+
+def _load_firmware_block(config: dict, here: Path) -> dict | None:
+    """
+    Return a firmware dict {version, bin_url, sha256} or None.
+
+    Priority:
+      1. firmware_manifest_url in config (fetch remote JSON).
+      2. cloud/public_assets/firmware.json on-disk (written by build-firmware workflow).
+      3. None → firmware key is omitted from departures.json.
+
+    Any failure at either source → None (best-effort, never blocks the file).
+    """
+    timeout = int(config.get("feed_timeout_seconds", 15))
+
+    # 1. Remote manifest URL.
+    manifest_url = (config.get("firmware_manifest_url") or "").strip()
+    if manifest_url:
+        try:
+            resp = requests.get(manifest_url, timeout=timeout)
+            resp.raise_for_status()
+            data = resp.json()
+            version = str(data["version"])
+            bin_url = str(data["bin_url"])
+            sha256 = str(data["sha256"])
+            log.info("Firmware block from remote manifest: version=%s", version)
+            return {"version": version, "bin_url": bin_url, "sha256": sha256}
+        except Exception as exc:
+            log.warning("Firmware manifest fetch failed (non-fatal, omitting firmware): %s", exc)
+            return None
+
+    # 2. On-disk fallback (written by build-firmware CI workflow).
+    local_fw = here / "public_assets" / "firmware.json"
+    if local_fw.exists():
+        try:
+            with open(local_fw, encoding="utf-8") as f:
+                data = json.load(f)
+            version = str(data["version"])
+            bin_url = str(data["bin_url"])
+            sha256 = str(data["sha256"])
+            log.info("Firmware block from on-disk public_assets/firmware.json: version=%s", version)
+            return {"version": version, "bin_url": bin_url, "sha256": sha256}
+        except Exception as exc:
+            log.warning("On-disk firmware.json unreadable (non-fatal, omitting firmware): %s", exc)
+            return None
+
+    # 3. Neither source available.
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -410,7 +610,7 @@ def build_departures(schedule: dict, rt_map: dict, now_local: datetime,
 # ---------------------------------------------------------------------------
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Update public/departures.json from RT feed.")
+    parser = argparse.ArgumentParser(description="Update public/departures.json (v3) from RT feed.")
     parser.add_argument("--config", default=None, help="Path to config.yaml")
     parser.add_argument("--schedule", default=None, help="Path to stop_schedule.json")
     parser.add_argument("--out", default=None, help="Output path for departures.json")
@@ -430,6 +630,14 @@ def main() -> int:
     with open(schedule_path, encoding="utf-8") as f:
         schedule = json.load(f)
 
+    # v3 check: warn if version mismatch (we still try to proceed).
+    sched_version = schedule.get("version", 2)
+    if sched_version != 3:
+        log.warning(
+            "stop_schedule.json has version=%s, expected 3 — run build_schedule.py to rebuild.",
+            sched_version,
+        )
+
     tz_name = config.get("timezone", "Australia/Brisbane")
     tz_obj = _get_tz(tz_name)
 
@@ -440,26 +648,64 @@ def main() -> int:
 
     log.info("Now UTC: %s  Local: %s  Offset: %+ds", now_utc.isoformat(), now_local.isoformat(), utc_offset)
 
-    # Fetch RT (non-fatal on error).
+    # ---- Fetch RT TripUpdates (non-fatal on error) --------------------------
     rt_url = config.get("rt_trip_updates_url", "")
     timeout = int(config.get("feed_timeout_seconds", 15))
-    rt_map = {}
+    rt_map: dict = {}
     if rt_url:
-        log.info("Fetching RT from %s …", rt_url)
+        log.info("Fetching RT TripUpdates from %s …", rt_url)
         rt_map = _fetch_rt(rt_url, timeout)
     else:
-        log.warning("No rt_trip_updates_url configured; using scheduled only.")
+        log.warning("No rt_trip_updates_url configured; using scheduled-only data.")
 
-    deps = build_departures(schedule, rt_map, now_local, now_epoch, tz_obj, config)
+    # ---- Fetch RT ServiceAlerts (best-effort; always yields a list) ---------
+    alerts_url = config.get("rt_service_alerts_url", "")
+    stops_config = config.get("stops", [])
+    alerts: list[dict] = _fetch_alerts(alerts_url, timeout, stops_config)
 
-    # Build output.
-    stop_label = config.get("stop_label", schedule.get("_meta", {}).get("stop_label", ""))
-    output = {
-        "stop_label": stop_label,
+    # ---- Build departures for each configured stop --------------------------
+    max_rows = int(config.get("max_rows", 6))
+    stops_schedule = schedule.get("stops", {})  # keyed by stable key
+
+    stops_out: list[dict] = []
+    for stop_cfg in stops_config:
+        key = stop_cfg["key"]
+        label = stop_cfg.get("label", key)
+        stop_entry = stops_schedule.get(key, {})
+        if not stop_entry:
+            log.warning("Stop %r not found in stop_schedule.json — emitting empty departures.", key)
+            # Emit an empty stop so the contract always has ALL configured stops.
+            stop_entry = {"label": label, "routes": [], "trips": []}
+
+        deps = build_stop_departures(
+            stop_entry=stop_entry,
+            rt_map=rt_map,
+            now_local=now_local,
+            now_epoch=now_epoch,
+            tz_obj=tz_obj,
+            max_rows=max_rows,
+            schedule=schedule,
+        )
+        log.info("Stop %r (%s): %d departures", key, label, len(deps))
+        stops_out.append({
+            "stop_id": key,
+            "stop_label": label,
+            "departures": deps,
+        })
+
+    # ---- Firmware block (optional) -----------------------------------------
+    firmware_block = _load_firmware_block(config, here)
+
+    # ---- Assemble v3 output -------------------------------------------------
+    output: dict = {
+        "version": 3,
         "generated_at": now_epoch,
         "utc_offset_seconds": utc_offset,
-        "departures": deps,
+        "alerts": alerts,
+        "stops": stops_out,
     }
+    if firmware_block is not None:
+        output["firmware"] = firmware_block
 
     out_path = Path(args.out) if args.out else here / "public" / "departures.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -467,7 +713,12 @@ def main() -> int:
         json.dump(output, f, separators=(",", ":"), ensure_ascii=True)
 
     sz = out_path.stat().st_size
-    log.info("Written %s (%d bytes, %d departures)", out_path, sz, len(deps))
+    total_deps = sum(len(s["departures"]) for s in stops_out)
+    log.info(
+        "Written %s (%d bytes, %d stops, %d total departures, %d alerts, firmware=%s)",
+        out_path, sz, len(stops_out), total_deps, len(alerts),
+        "yes" if firmware_block else "omitted",
+    )
     return 0
 
 

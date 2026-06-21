@@ -2,9 +2,10 @@
 """
 build_schedule.py — One-off / weekly job.
 
-Downloads the SEQ static GTFS zip, parses the stop-relevant data, and writes
-cloud/stop_schedule.json — a compact precomputed schedule that update_departures.py
-uses every 5 minutes WITHOUT needing the 28 MB GTFS download.
+Downloads the SEQ static GTFS zip, parses the stop-relevant data for ALL
+configured stops, and writes cloud/stop_schedule.json — a compact precomputed
+schedule (Data Contract v3) that update_departures.py uses every 5 minutes
+WITHOUT needing the 28 MB GTFS download.
 
 Run once at setup, then it auto-refreshes weekly via GitHub Actions.
 
@@ -19,6 +20,7 @@ import json
 import logging
 import os
 import sys
+import time
 import zipfile
 from pathlib import Path
 
@@ -79,52 +81,95 @@ def _open_csv(zf: zipfile.ZipFile, name: str) -> csv.DictReader:
 
 
 # ---------------------------------------------------------------------------
-# Core parsing
+# Stop resolver: match_ids → set of GTFS stop_ids
 # ---------------------------------------------------------------------------
 
-def _parse_gtfs(zf: zipfile.ZipFile, stop_ids: set) -> dict:
+def _resolve_stop_ids(zf: zipfile.ZipFile, match_ids: list) -> set:
     """
-    Parse the GTFS zip (already open) and return a compact schedule dict.
+    For each id in match_ids, scan stops.txt for rows where
+    stop_id == id OR stop_code == id.  Return the union of all matched stop_ids.
+    This lets callers supply either the GTFS stop_id or the public stop code
+    and the resolver handles either form transparently.
+    """
+    match_set = set(str(m) for m in match_ids)
+    resolved = set()
+    for row in _open_csv(zf, "stops.txt"):
+        sid = row.get("stop_id", "").strip()
+        scode = row.get("stop_code", "").strip()
+        if sid in match_set or scode in match_set:
+            resolved.add(sid)
+    return resolved
 
-    Structure returned:
+
+# ---------------------------------------------------------------------------
+# Core parsing — v3 multi-stop
+# ---------------------------------------------------------------------------
+
+def _parse_gtfs_v3(zf: zipfile.ZipFile, stops_config: list) -> dict:
+    """
+    Parse the GTFS zip for ALL configured stops and return a v3 schedule dict.
+
+    Each stop entry in stops_config must have: key, label, match_ids, routes.
+
+    Structure returned (Data Contract v3 §B):
     {
-      "routes":   { route_id: route_short_name },
-      "calendar": {
-          service_id: {
-              "monday": 0|1, "tuesday": 0|1, ..., "sunday": 0|1,
-              "start_date": "YYYYMMDD",
-              "end_date":   "YYYYMMDD"
-          }
+      "version": 3,
+      "built_at": <epoch int>,
+      "timezone": "Australia/Brisbane",
+      "stops": {
+        "<key>": {
+          "label": "...",
+          "routes": ["320"],
+          "trips": [
+            {
+              "trip_id": "...",
+              "route": "320",
+              "dest": "City",
+              "service_id": "...",
+              "dep": "07:42:00"    # local, may exceed 24:00:00 for after-midnight
+            }
+          ]
+        },
+        ...
       },
-      "calendar_dates": [
-          {"service_id": ..., "date": "YYYYMMDD", "exception_type": 1|2}
-      ],
-      "trips": {
-          trip_id: {
-              "route_id": ...,
-              "service_id": ...,
-              "headsign": ...,
-          }
-      },
-      "stop_times": [
-          {
-              "trip_id": ...,
-              "stop_id": ...,
-              "departure_time": "HH:MM:SS",   # may be >=24:00 for after-midnight
-              "stop_sequence": int
-          }
-      ]
+      "calendar":       { service_id: {weekday flags, start_date, end_date} },
+      "calendar_dates": { service_id: [{date, exception_type}] }
     }
     """
+
+    # ---- Resolve stop IDs for every configured stop -------------------------
+    log.info("Resolving match_ids to GTFS stop_ids via stops.txt …")
+    resolved_by_key: dict[str, set] = {}
+    for stop_cfg in stops_config:
+        key = stop_cfg["key"]
+        match_ids = stop_cfg.get("match_ids", [])
+        resolved = _resolve_stop_ids(zf, match_ids)
+        resolved_by_key[key] = resolved
+        if resolved:
+            log.info("  Stop %r → GTFS stop_ids: %s", key, sorted(resolved))
+        else:
+            log.warning(
+                "Stop %r: none of match_ids %s resolved to any stops.txt row — "
+                "check your match_ids in config.yaml",
+                key, match_ids,
+            )
+
+    # Flat set of all GTFS stop_ids we care about (for stop_times scan).
+    all_stop_ids: set = set()
+    for s in resolved_by_key.values():
+        all_stop_ids |= s
+
+    # ---- Parse routes -------------------------------------------------------
     log.info("Parsing routes …")
-    routes = {}
+    routes: dict[str, str] = {}  # route_id → route_short_name
     for r in _open_csv(zf, "routes.txt"):
         routes[r["route_id"]] = r.get("route_short_name", r["route_id"])
 
+    # ---- Parse calendar -----------------------------------------------------
     log.info("Parsing calendar …")
-    calendar = {}
+    calendar: dict = {}
+    _DAY_COLS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
     try:
-        _DAY_COLS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
         for r in _open_csv(zf, "calendar.txt"):
             calendar[r["service_id"]] = {
                 col: int(r.get(col, 0) or 0) for col in _DAY_COLS
@@ -134,35 +179,46 @@ def _parse_gtfs(zf: zipfile.ZipFile, stop_ids: set) -> dict:
     except Exception as exc:
         log.warning("calendar.txt parse issue (may be absent): %s", exc)
 
+    # ---- Parse calendar_dates -----------------------------------------------
     log.info("Parsing calendar_dates …")
-    calendar_dates = []
+    # v3 shape: dict keyed by service_id → list of {date, exception_type}
+    calendar_dates: dict[str, list] = {}
     try:
         for r in _open_csv(zf, "calendar_dates.txt"):
-            calendar_dates.append({
-                "service_id": r["service_id"],
+            entry = {
                 "date": r["date"],
                 "exception_type": int(r["exception_type"]),
-            })
+            }
+            calendar_dates.setdefault(r["service_id"], []).append(entry)
     except Exception as exc:
         log.warning("calendar_dates.txt parse issue: %s", exc)
 
-    log.info("Scanning stop_times for stop_ids %s …", stop_ids)
-    relevant_trip_ids = set()
-    stop_times = []
+    # ---- Scan stop_times for relevant stops ---------------------------------
+    log.info("Scanning stop_times for %d GTFS stop_ids …", len(all_stop_ids))
+    relevant_trip_ids: set = set()
+    # stop_times_by_trip_stop: (trip_id, stop_id) → (dep_time, stop_sequence)
+    # We store one row per (trip, stop) — for a given stop there is typically
+    # exactly one row per trip, but we keep the earliest stop_sequence in case
+    # of duplicates.
+    raw_stop_times: list[dict] = []
     for r in _open_csv(zf, "stop_times.txt"):
-        if r["stop_id"] in stop_ids:
+        if r["stop_id"] in all_stop_ids:
             dep = r.get("departure_time") or r.get("arrival_time", "")
-            stop_times.append({
+            raw_stop_times.append({
                 "trip_id": r["trip_id"],
                 "stop_id": r["stop_id"],
                 "departure_time": dep.strip(),
                 "stop_sequence": int(r.get("stop_sequence", 0) or 0),
             })
             relevant_trip_ids.add(r["trip_id"])
-    log.info("Found %d stop_time rows across %d trips", len(stop_times), len(relevant_trip_ids))
+    log.info(
+        "Found %d stop_time rows across %d trips for all configured stops",
+        len(raw_stop_times), len(relevant_trip_ids),
+    )
 
+    # ---- Parse trips (only those relevant to our stops) ---------------------
     log.info("Parsing trips (filtering to relevant) …")
-    trips = {}
+    trips: dict = {}  # trip_id → {route_id, service_id, headsign}
     for r in _open_csv(zf, "trips.txt"):
         if r["trip_id"] in relevant_trip_ids:
             trips[r["trip_id"]] = {
@@ -172,12 +228,65 @@ def _parse_gtfs(zf: zipfile.ZipFile, stop_ids: set) -> dict:
             }
     log.info("Kept %d trips", len(trips))
 
+    # ---- Build per-stop trip lists -----------------------------------------
+    # Index stop_times by trip_id for quick lookup.
+    st_by_trip: dict[str, list] = {}
+    for st in raw_stop_times:
+        st_by_trip.setdefault(st["trip_id"], []).append(st)
+
+    stops_out: dict = {}
+    for stop_cfg in stops_config:
+        key = stop_cfg["key"]
+        label = stop_cfg.get("label", key)
+        route_filter = set(stop_cfg.get("routes") or [])
+        gtfs_stop_ids = resolved_by_key.get(key, set())
+
+        trip_list: list[dict] = []
+        for trip_id, trip in trips.items():
+            route_short = routes.get(trip["route_id"], trip["route_id"])
+            if route_filter and route_short not in route_filter:
+                continue
+
+            for st in st_by_trip.get(trip_id, []):
+                if st["stop_id"] not in gtfs_stop_ids:
+                    continue
+                dep = st.get("departure_time", "")
+                if not dep:
+                    continue
+                trip_list.append({
+                    "trip_id": trip_id,
+                    "route": route_short,
+                    "dest": trip.get("headsign", ""),
+                    "service_id": trip["service_id"],
+                    "dep": dep,
+                })
+
+        if not trip_list:
+            log.warning(
+                "WARNING: Stop %r resolved to GTFS stop_ids %s but yielded ZERO trips "
+                "for routes %s — check your match_ids and routes in config.yaml",
+                key, sorted(gtfs_stop_ids), sorted(route_filter),
+            )
+        else:
+            log.info("Stop %r: %d trips", key, len(trip_list))
+
+        stops_out[key] = {
+            "label": label,
+            "routes": list(stop_cfg.get("routes") or []),
+            # gtfs_stop_ids is the set of GTFS stop_id values (from stops.txt)
+            # that correspond to this logical stop.  update_departures.py uses
+            # this list to look up the correct StopTimeUpdate entry in RT feeds.
+            "gtfs_stop_ids": sorted(gtfs_stop_ids),
+            "trips": trip_list,
+        }
+
     return {
-        "routes": routes,
+        "version": 3,
+        "built_at": int(time.time()),
+        "timezone": "Australia/Brisbane",
+        "stops": stops_out,
         "calendar": calendar,
         "calendar_dates": calendar_dates,
-        "trips": trips,
-        "stop_times": stop_times,
     }
 
 
@@ -186,7 +295,7 @@ def _parse_gtfs(zf: zipfile.ZipFile, stop_ids: set) -> dict:
 # ---------------------------------------------------------------------------
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Build stop_schedule.json from static GTFS.")
+    parser = argparse.ArgumentParser(description="Build stop_schedule.json (v3) from static GTFS.")
     parser.add_argument("--config", default=None, help="Path to config.yaml")
     args = parser.parse_args()
 
@@ -194,9 +303,9 @@ def main() -> int:
     log.info("Using config: %s", config_path)
     config = _load_config(config_path)
 
-    stop_ids = set(str(s) for s in config.get("stop_ids", []))
-    if not stop_ids:
-        log.error("No stop_ids configured — edit config.yaml")
+    stops_config = config.get("stops", [])
+    if not stops_config:
+        log.error("No 'stops' configured in config.yaml — add at least one stop entry.")
         return 1
 
     zip_url = config.get("gtfs_static_zip_url", "https://gtfsrt.api.translink.com.au/GTFS/SEQ_GTFS.zip")
@@ -223,23 +332,15 @@ def main() -> int:
 
     log.info("Opening zip …")
     with zipfile.ZipFile(zip_path) as zf:
-        schedule = _parse_gtfs(zf, stop_ids)
-
-    # Embed metadata.
-    import time
-    schedule["_meta"] = {
-        "stop_ids": sorted(stop_ids),
-        "stop_label": config.get("stop_label", ""),
-        "built_at_epoch": int(time.time()),
-        "gtfs_zip_url": zip_url,
-    }
+        schedule = _parse_gtfs_v3(zf, stops_config)
 
     out_path = here / "stop_schedule.json"
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(schedule, f, separators=(",", ":"))
 
     sz = out_path.stat().st_size
-    log.info("Written %s (%.1f KB)", out_path, sz / 1024)
+    log.info("Written %s (%.1f KB) — version %s, %d stops",
+             out_path, sz / 1024, schedule.get("version"), len(schedule.get("stops", {})))
 
     # Clean up the large zip to keep the repo lean (it's not committed).
     try:
