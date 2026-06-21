@@ -552,29 +552,15 @@ static void armButtonWakeup()
 // =============================================================================
 static bool detectPowerAwake()
 {
-    if (gPowerMode == 1) { Serial.println("[PWR]  Mode=AWAKE (forced)"); return true;  }
-    if (gPowerMode == 2) { Serial.println("[PWR]  Mode=SLEEP (forced)"); return false; }
-
-    // AUTO -------------------------------------------------------------------
-    if ((bool)Serial) {                         // a USB host has opened the CDC port
-        Serial.println("[PWR]  AUTO -> AWAKE (USB host detected)");
-        return true;
-    }
-#if ENABLE_BATTERY_MONITOR
-    uint32_t adcMv  = (uint32_t)analogReadMilliVolts(0);
-    uint32_t vbatMv = (uint32_t)((float)adcMv * VBAT_DIVIDER_RATIO);
-    Serial.printf("[PWR]  AUTO check: vbat=%lu mV (USB_DETECT_MV=%d)\n",
-                  (unsigned long)vbatMv, (int)USB_DETECT_MV);
-    if (vbatMv >= (uint32_t)USB_DETECT_MV) {
-        Serial.println("[PWR]  AUTO -> AWAKE (rail high → charging/USB)");
-        return true;
-    }
-    Serial.println("[PWR]  AUTO -> SLEEP (on battery)");
+    // v3.4.1 RECOVERY: stay-awake mode is DISABLED.  On real hardware the
+    // esp_restart-every-refresh loop destabilised Wi-Fi (rapid reconnects) and
+    // could leave the sign churning / unable to settle on the setup portal.  We
+    // now ALWAYS use the proven deep-sleep path (identical to v3.3.x stability).
+    // The power_mode setting + portal field are retained for a future, properly
+    // tested awake rework that keeps Wi-Fi UP across refreshes instead of rebooting.
+    (void)gPowerMode;
+    Serial.println("[PWR]  Stay-awake disabled (v3.4.1) — using stable deep-sleep");
     return false;
-#else
-    Serial.println("[PWR]  AUTO -> AWAKE (no battery sense; assuming USB)");
-    return true;
-#endif
 }
 
 // =============================================================================
@@ -1038,8 +1024,9 @@ static bool performOTA(const char* bin_url, const char* expected_sha256)
 
 // =============================================================================
 // isHexSha256() — validate that a string is exactly 64 lowercase hex chars.
-// Used for OTA safety gate.
+// Used for OTA safety gate.  (Only compiled when ENABLE_OTA; v3.4.1 disables OTA.)
 // =============================================================================
+#if ENABLE_OTA
 static bool isHexSha256(const char* s)
 {
     if (!s || strlen(s) != 64) return false;
