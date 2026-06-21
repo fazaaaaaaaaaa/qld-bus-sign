@@ -57,7 +57,7 @@ rt_trip_updates_url: "https://gtfsrt.api.translink.com.au/api/realtime/SEQ/TripU
 # Real-time ServiceAlerts protobuf.
 # Any failure (HTTP error, timeout, parse error) → alerts: [] in departures.json.
 # On 404 the backend logs a warning and continues — departures are never blocked.
-rt_service_alerts_url: "https://gtfsrt.api.translink.com.au/api/realtime/SEQ/ServiceAlerts"
+rt_service_alerts_url: "https://gtfsrt.api.translink.com.au/api/realtime/SEQ/Alerts"
 
 # ---- OTA Firmware (optional) -----------------------------------
 # If firmware_manifest_url is non-empty, update_departures.py fetches it and
