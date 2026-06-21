@@ -53,7 +53,7 @@ jobs:
       - name: Read FW_VERSION from firmware/include/config.h
         id: fw_version
         run: |
-          VER=$(grep -oP '(?<=#define FW_VERSION ")([^"]+)' firmware/include/config.h)
+          VER=$(grep -oP '#define\s+FW_VERSION\s+"\K[^"]+' firmware/include/config.h)
           if [ -z "$VER" ]; then
             echo "ERROR: could not parse FW_VERSION from firmware/include/config.h" >&2
             exit 1
