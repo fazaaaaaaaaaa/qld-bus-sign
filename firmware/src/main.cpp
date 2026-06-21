@@ -79,6 +79,15 @@ RTC_DATA_ATTR static int  wifiFailCount       = 0;
 RTC_DATA_ATTR static int  fullRefreshCounter  = 0;  // Feature 1b: ghost-clear cycle counter
 RTC_DATA_ATTR static bool panelEverPainted    = false;  // FIX 1: true once the panel has been painted at least once
 
+// Feature 8 (v3.2): manual stop override set by a LEFT/RIGHT button press.
+//   -1 = none (use normal time-of-day selection)
+//    0 = force HOME_STOP_ID  (LEFT  — morning/home stop, route 320 from Bonney Ave)
+//    1 = force CITY_STOP_ID  (RIGHT — return/city stop)
+// Stored in RTC memory so a press that WAKES the device survives into the stop-
+// selection block this same cycle.  It is cleared back to -1 immediately after
+// being applied, so the NEXT scheduled (timer) wake returns to normal behaviour.
+RTC_DATA_ATTR static int  manualStopOverride  = -1;
+
 // =============================================================================
 // g_pSetupDisplay — file-scope pointer used by the WiFiManager AP callback.
 // =============================================================================
@@ -381,6 +390,118 @@ static void showStatusMessage(const char* line1, const char* line2 = nullptr)
 }
 
 // =============================================================================
+// Feature 8 (v3.2) — Physical LEFT / RIGHT button helpers
+//
+// Hardware recap (see config.h FEATURE 8 for full notes):
+//   - LEFT and RIGHT are read from a resistor ladder on ADC pin GPIO1
+//     (BTN_ADC_LEFT_PIN == BTN_ADC_RIGHT_PIN == 1).  Idle rests HIGH (~3632 on
+//     the 12-bit scale); LEFT pulls it to ~1380, RIGHT pulls it to ~4.
+//   - POWER (GPIO3) is a direct active-LOW digital pin, used only as an extra
+//     deep-sleep wake source.
+//
+// ButtonId — what readButton() returns.
+// =============================================================================
+enum ButtonId { BTN_NONE = 0, BTN_LEFT = 1, BTN_RIGHT = 2 };
+
+// readButton() — sample the ADC ladder and classify LEFT / RIGHT / none.
+//
+// Debounce: take a few quick reads and require the SAME classification twice in
+// a row before accepting it (cheap rejection of a transient mid-press voltage
+// while the ladder settles).  Always prints the raw ADC values so the user can
+// calibrate the windows in config.h by watching the serial monitor.
+//
+// Returns BTN_LEFT / BTN_RIGHT / BTN_NONE.
+static ButtonId classifyAdc(int adc)
+{
+    if (adc >= BTN_RIGHT_ADC_MIN && adc <= BTN_RIGHT_ADC_MAX) return BTN_RIGHT;
+    if (adc >= BTN_LEFT_ADC_MIN  && adc <= BTN_LEFT_ADC_MAX)  return BTN_LEFT;
+    return BTN_NONE;
+}
+
+static ButtonId readButton()
+{
+    // BTN_ADC_LEFT_PIN and BTN_ADC_RIGHT_PIN are the same physical pin on the X4
+    // (GPIO1).  Read each (in case a future board splits them) and prefer a
+    // definite LEFT/RIGHT over none.  adc2 is the second ladder pin (Up/Down);
+    // it carries no LEFT/RIGHT info but is printed to aid calibration/debug.
+    ButtonId result = BTN_NONE;
+    int adc1 = 0, adc1b = 0, adc2 = 0;
+
+    for (int i = 0; i < 3 && result == BTN_NONE; i++) {
+        adc1  = analogRead(BTN_ADC_LEFT_PIN);
+        adc1b = (BTN_ADC_RIGHT_PIN != BTN_ADC_LEFT_PIN)
+                    ? analogRead(BTN_ADC_RIGHT_PIN) : adc1;
+        adc2  = analogRead(BTN_ADC_2_PIN);
+
+        ButtonId c1 = classifyAdc(adc1);
+        ButtonId c2 = classifyAdc(adc1b);
+        ButtonId cand = (c1 != BTN_NONE) ? c1 : c2;
+
+        if (cand != BTN_NONE) {
+            // Debounce: confirm with one more read of the LEFT pin.
+            delay(8);
+            int adcConfirm = analogRead(BTN_ADC_LEFT_PIN);
+            if (classifyAdc(adcConfirm) == cand) {
+                result = cand;
+            }
+        } else {
+            delay(4);
+        }
+    }
+
+    const char* nm = (result == BTN_LEFT) ? "LEFT"
+                   : (result == BTN_RIGHT) ? "RIGHT" : "none";
+    Serial.printf("[BTN] adc1=%4d adc2=%4d -> %s\n", adc1, adc2, nm);
+    return result;
+}
+
+// armButtonWakeup() — enable deep-sleep wake on the button pins, in ADDITION to
+// the timer wake that goToSleep() always configures.
+//
+// DESIGN / TRADEOFF (documented per requirement):
+//   The LEFT/RIGHT buttons sit on an ADC resistor ladder (GPIO1) that rests
+//   HIGH (~2.9 V) when idle and is pulled DOWN by a press (LEFT→~1.1 V,
+//   RIGHT→~0 V — both well below the digital-HIGH threshold).  A deep-sleep
+//   GPIO wake treats the pad digitally, so a LOW-level wake on GPIO1 fires when
+//   ANY ladder button (Left/Right/Back/Confirm) is pressed.  That is exactly
+//   what we want for "wake on a button": the wake just needs to start a fresh
+//   cycle; readButton() then disambiguates LEFT vs RIGHT from the ADC value.
+//
+//   Resistor note: for a LOW-level wake the IDF auto-resistor feature
+//   (ESP_SLEEP_GPIO_ENABLE_INTERNAL_RESISTORS, on by default) adds an internal
+//   pull-UP to define the idle state as HIGH.  That does NOT fight our wiring —
+//   the external ladder already rests GPIO1 HIGH and GPIO3 has a hardware
+//   pull-up, so the internal pull-up merely reinforces idle-HIGH while a press
+//   still pulls the pin firmly LOW through the ladder.  We therefore leave the
+//   default behaviour in place (Espressif recommends an external pull-up for
+//   low-level wake; the ladder/power-button provide one).
+//
+//   GPIO3 (POWER, active-LOW, direct) is added as a SECOND low-level wake pin
+//   for robustness.  A POWER-button wake produces no LEFT/RIGHT ADC signature,
+//   so on that wake readButton() returns none and the device simply refreshes
+//   the time-of-day stop — a harmless, useful "wake & refresh now" gesture.
+//
+//   GPIO1/GPIO3 are both RTC-capable (RTC GPIOs are 0..5 on the C3), so both
+//   qualify for esp_deep_sleep_enable_gpio_wakeup().  The timer wake remains
+//   enabled alongside, so the normal REFRESH_MINUTES schedule is untouched.
+static void armButtonWakeup()
+{
+    // Build a bit mask of the wake pins (BIT(gpio)).
+    const uint64_t wakeMask = (1ULL << BTN_ADC_LEFT_PIN) |   // GPIO1 ladder (LEFT/RIGHT/Back/Confirm)
+                              (1ULL << BTN_POWER_PIN);        // GPIO3 power button
+
+    // Low-level wake: idle pads rest HIGH, a press drives them LOW.
+    esp_err_t werr = esp_deep_sleep_enable_gpio_wakeup(wakeMask, ESP_GPIO_WAKEUP_GPIO_LOW);
+    if (werr == ESP_OK) {
+        Serial.println("[BTN] Deep-sleep GPIO wake armed (GPIO1 ladder + GPIO3 power, LOW)");
+    } else {
+        // Non-fatal: timer wake still fires, so the sign keeps updating on schedule.
+        Serial.printf("[BTN] GPIO wake arm failed (err=%d) — timer wake still active\n",
+                      (int)werr);
+    }
+}
+
+// =============================================================================
 // goToSleep()
 // =============================================================================
 static void goToSleep(int sleepMin = 0)
@@ -393,6 +514,7 @@ static void goToSleep(int sleepMin = 0)
                   sleepMin, (unsigned long long)sleep_us);
     Serial.flush();
     esp_sleep_enable_timer_wakeup(sleep_us);
+    armButtonWakeup();   // Feature 8: ADD button wake alongside the timer wake
     esp_deep_sleep_start();
 }
 
@@ -747,6 +869,44 @@ void setup()
     Preferences prefs;
     prefs.begin("busign", /*readOnly=*/false);
     loadRuntimeSettings(prefs);
+
+    // ---- 1c. Button wake detection (Feature 8, v3.2) -----------------------
+    // The deep-sleep wake could have come from the timer (normal schedule) OR
+    // from a physical button (LEFT/RIGHT ladder on GPIO1, or the POWER button on
+    // GPIO3).  Set up the ADC pins, print the raw values for calibration, and —
+    // if this wake was a GPIO (button) wake showing a LEFT/RIGHT signature — set
+    // manualStopOverride so the stop-selection block (§12) shows that stop with
+    // a FRESH fetch (the fetch happens naturally later in this same cycle).
+    //
+    // Pin init for the C3 ADC: explicit INPUT + 12-bit resolution + 11 dB
+    // attenuation so the full 0–3.3 V ladder range maps onto analogRead()'s
+    // 0–4095 scale (matches the thresholds derived in config.h).
+    pinMode(BTN_ADC_LEFT_PIN,  INPUT);
+    pinMode(BTN_ADC_RIGHT_PIN, INPUT);
+    pinMode(BTN_ADC_2_PIN,     INPUT);
+    pinMode(BTN_POWER_PIN,     INPUT_PULLUP);   // direct active-LOW power button
+    analogReadResolution(12);                   // 0..4095 (matches config.h windows)
+    analogSetAttenuation(ADC_11db);             // full 0–3.3 V span (chip-wide; default is already 11db)
+
+    esp_sleep_wakeup_cause_t wakeCause = esp_sleep_get_wakeup_cause();
+    bool gpioWake = (wakeCause == ESP_SLEEP_WAKEUP_GPIO);
+    Serial.printf("[BTN] wake cause=%d  gpioWake=%d  (gpio status=0x%llx)\n",
+                  (int)wakeCause, (int)gpioWake,
+                  (unsigned long long)esp_sleep_get_gpio_wakeup_status());
+
+    // Always sample + print on boot so the user can calibrate by watching serial.
+    ButtonId bootBtn = readButton();
+
+    // Only adopt the press as an override when it actually woke us AND reads as
+    // LEFT/RIGHT.  (A POWER-button wake reads as none → no override → normal
+    // time-of-day stop with a fresh fetch, which is a fine "refresh now" action.)
+    if (gpioWake && bootBtn == BTN_LEFT) {
+        manualStopOverride = 0;   // HOME / morning stop
+        Serial.println("[BTN] Boot wake = LEFT  -> manualStopOverride=0 (HOME)");
+    } else if (gpioWake && bootBtn == BTN_RIGHT) {
+        manualStopOverride = 1;   // CITY / return stop
+        Serial.println("[BTN] Boot wake = RIGHT -> manualStopOverride=1 (CITY)");
+    }
 
     // ---- 2. SPI bus init ---------------------------------------------------
     SPI.begin(EPD_SCK, EPD_MISO, EPD_MOSI, /*ss=*/-1);
@@ -1254,7 +1414,21 @@ void setup()
 
     // Determine target stop_id
     const char* targetStopId = nullptr;
-    if (now_utc > 0) {
+
+    // Feature 8 (v3.2): a physical-button press takes PRIORITY over the
+    // time-of-day choice for this one wake cycle.  manualStopOverride was set in
+    // setup() step 1c (from a button wake) or in the post-render live poll (see
+    // below) which then esp_restart()s back through here.  After applying it we
+    // clear it to -1 so the NEXT scheduled (timer) wake returns to normal
+    // time-based behaviour.  The data is still freshly fetched above, so a press
+    // always shows up-to-the-minute timings for the chosen stop.
+    if (manualStopOverride >= 0) {
+        targetStopId = (manualStopOverride == 0) ? HOME_STOP_ID : CITY_STOP_ID;
+        Serial.printf("[BTN] manual stop override -> %s (%s)\n",
+                      targetStopId,
+                      (manualStopOverride == 0) ? "HOME/LEFT" : "CITY/RIGHT");
+        manualStopOverride = -1;   // one-shot: next scheduled wake is normal again
+    } else if (now_utc > 0) {
         int64_t localEpoch = (int64_t)now_utc + (int64_t)utc_offset;
         int localHour = (int)((localEpoch / 3600LL) % 24LL);
         if (localHour < 0) localHour += 24;  // negative-wrap fix
@@ -1532,6 +1706,53 @@ void setup()
         prefs.putInt("last_has_alert",    hasAlerts ? 1 : 0);
         prefs.putInt("last_stale",        stale     ? 1 : 0);
     }
+
+    // ---- 17b. Live button poll (Feature 8, v3.2) ---------------------------
+    // The board is now on-screen.  Briefly watch the LEFT/RIGHT buttons so a
+    // press made WHILE the screen is awake also switches the view — not only a
+    // press that wakes the device from deep sleep.
+    //
+    // Why esp_restart() instead of re-running fetch+render inline?
+    //   esp_restart() replays the entire, already-tested wake path (fresh Wi-Fi,
+    //   NTP, HTTPS fetch+retry, parse, OTA gate, hash, render) with zero code
+    //   duplication and no risk of dangling JsonDocument pointers.  Crucially,
+    //   RTC_DATA_ATTR memory SURVIVES a software reset (it is only cleared on a
+    //   power-on reset), so manualStopOverride set here carries into the
+    //   restarted cycle's stop-selection block (§12), which applies and then
+    //   clears it.  The result is a clean fresh fetch + render of the chosen
+    //   stop, exactly like a deep-sleep button wake.
+    //
+    // Guard against self-trigger: we skip this poll on a cycle that was itself a
+    // button wake (gpioWake) — the wake-press may still be held/settling and we
+    // don't want an immediate restart loop.  We also only act when the press
+    // selects a DIFFERENT stop than the one just rendered.
+#if BUTTON_HOLD_OVERRIDE > 0
+    if (!gpioWake) {
+        Serial.printf("[BTN] Live poll for %d ms (press LEFT/RIGHT to switch stop)\n",
+                      (int)BUTTON_HOLD_OVERRIDE);
+        uint32_t pollStart = millis();
+        while (millis() - pollStart < (uint32_t)BUTTON_HOLD_OVERRIDE) {
+            ButtonId b = readButton();
+            int wantOverride = (b == BTN_LEFT)  ? 0
+                             : (b == BTN_RIGHT) ? 1 : -1;
+            if (wantOverride >= 0) {
+                const char* wantStopId = (wantOverride == 0) ? HOME_STOP_ID : CITY_STOP_ID;
+                // Only switch if it differs from what is already shown.
+                if (!selectedStopId || strcmp(selectedStopId, wantStopId) != 0) {
+                    manualStopOverride = wantOverride;   // survives esp_restart()
+                    Serial.printf("[BTN] Live press -> override=%d (%s) — restarting for fresh fetch\n",
+                                  wantOverride, wantStopId);
+                    prefs.end();
+                    Serial.flush();
+                    delay(50);
+                    esp_restart();   // replay full wake path; §12 applies the override
+                }
+            }
+            delay(40);   // light debounce / poll pacing
+        }
+        Serial.println("[BTN] Live poll window closed — no stop switch");
+    }
+#endif // BUTTON_HOLD_OVERRIDE
 
     // ---- 18. Smart sleep decision ------------------------------------------
     int sleepMinutes = gRefreshMin;  // default
