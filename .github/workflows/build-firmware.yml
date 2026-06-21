@@ -100,8 +100,15 @@ jobs:
             0x10000 "${{ steps.bins.outputs.bd }}/firmware.bin"
           echo "merged image: $(du -h public_assets/firmware-merged.bin | cut -f1)"
 
-      - name: Copy app binary (for OTA) into public_assets/
-        run: cp "${{ steps.bins.outputs.bd }}/firmware.bin" public_assets/firmware.bin
+      - name: Copy app + partitions + otadata into public_assets/
+        # The X4's Puya flash only boots with its STOCK bootloader (PlatformIO's
+        # won't). So the web flasher writes everything EXCEPT offset 0x0 and leaves
+        # whatever bootloader is already on the device — every X4 ships with a
+        # working one — untouched.
+        run: |
+          cp "${{ steps.bins.outputs.bd }}/firmware.bin"   public_assets/firmware.bin
+          cp "${{ steps.bins.outputs.bd }}/partitions.bin" public_assets/partitions.bin
+          cp "${{ steps.bins.outputs.boot_app0 }}"         public_assets/boot_app0.bin
 
       - name: Write OTA manifest + ESP Web Tools manifest
         run: |
@@ -115,14 +122,21 @@ jobs:
                   "bin_url": "https://fazaaaaaaaaaa.github.io/qld-bus-sign/firmware.bin",
                   "sha256":  sha,
               }, f, indent=2)
+          # ESP Web Tools manifest for the X4: write partitions(0x8000) +
+          # otadata(0xe000) + app(0x10000) and DO NOT touch 0x0. erase=false so
+          # the device keeps its working stock bootloader.
           with open("public_assets/manifest.json", "w") as f:
               json.dump({
                   "name": "QLD Bus Sign",
                   "version": ver,
-                  "new_install_prompt_erase": True,
+                  "new_install_prompt_erase": False,
                   "builds": [{
                       "chipFamily": "ESP32-C3",
-                      "parts": [{"path": "firmware-merged.bin", "offset": 0}],
+                      "parts": [
+                          {"path": "partitions.bin", "offset": 32768},   # 0x8000
+                          {"path": "boot_app0.bin",  "offset": 57344},   # 0xe000
+                          {"path": "firmware.bin",   "offset": 65536},   # 0x10000
+                      ],
                   }],
               }, f, indent=2)
           print("wrote firmware.json + manifest.json for v" + ver)
@@ -135,7 +149,8 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add public_assets/firmware.bin public_assets/firmware.json \
+          git add public_assets/firmware.bin public_assets/partitions.bin \
+                  public_assets/boot_app0.bin public_assets/firmware.json \
                   public_assets/firmware-merged.bin public_assets/manifest.json
           git diff --cached --quiet || git commit -m \
             "chore: publish firmware v${{ steps.fw_version.outputs.version }} (OTA + web flasher) [skip ci]"
