@@ -1,0 +1,346 @@
+#pragma once
+// =============================================================================
+// config.h — USER-EDITABLE CONFIGURATION
+// QLD Bus Departure Sign — Xteink X4 Firmware (JSON/NTP edition)
+//
+// Edit the values in this file before building.
+// Hardware pin assignments are at the bottom — change only if your PCB
+// differs from the Xteink X4 reference design.
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// Wi-Fi credentials — OPTIONAL hardcoded override
+//
+// DEFAULT (recommended): leave WIFI_SSID as an empty string "".
+//   On first boot the device opens a captive-portal access point named
+//   WIFI_PORTAL_AP_NAME (see below).  Connect to that AP from your phone;
+//   a setup page pops up automatically — pick your home Wi-Fi and enter its
+//   password.  The credentials are stored in ESP32 NVS (non-volatile storage)
+//   and reused on every subsequent wake without re-entering them.
+//
+// ADVANCED OVERRIDE: set WIFI_SSID to a non-empty string to bypass the portal
+//   entirely and connect directly with these hardcoded credentials.  Useful for
+//   development or networks where the portal flow is impractical.
+//   NOTE: If you leave WIFI_SSID non-empty, WIFI_PORTAL_AP_NAME / WIFI_PORTAL_*
+//   settings below are irrelevant — the portal is never opened.
+//
+// The ESP32-C3 supports 2.4 GHz only — 5 GHz-only APs will not work.
+// -----------------------------------------------------------------------------
+#define WIFI_SSID   ""    // leave empty → use phone captive-portal setup (recommended)
+#define WIFI_PASS   ""    // leave empty → portal supplies the password
+
+// -----------------------------------------------------------------------------
+// Captive-portal (WiFiManager) settings
+//
+// WIFI_PORTAL_AP_NAME  — SSID of the temporary setup access point.
+//   The device broadcasts this as a Wi-Fi AP while the portal is open.
+//   A phone connecting to it will see a "sign in to network" / hotel-WiFi
+//   style pop-up automatically (iOS Captive Network Assistant / Android).
+//
+// WIFI_PORTAL_TIMEOUT_S — how long (seconds) the portal stays open while
+//   waiting for the user to configure Wi-Fi before the device gives up and
+//   deep-sleeps to retry next wake.  180 s (3 min) is a comfortable default.
+//
+// WIFI_PORTAL_AFTER_FAILS — number of consecutive failed Wi-Fi connections
+//   (across deep-sleep cycles) before the device re-opens the portal.
+//   This handles the case where your router SSID/password changes (e.g. you
+//   get a new ISP or move house).  The counter resets to 0 on every successful
+//   connection.  Set to 0 to re-open the portal on every single failure (not
+//   recommended; wastes battery on transient dropouts).
+// -----------------------------------------------------------------------------
+#define WIFI_PORTAL_AP_NAME     "QLD-Bus-Sign-Setup"
+#define WIFI_PORTAL_TIMEOUT_S   180
+#define WIFI_PORTAL_AFTER_FAILS 1
+
+// -----------------------------------------------------------------------------
+// Departures JSON endpoint  (HTTPS — GitHub Pages or any static host)
+//
+// The firmware does:  GET {DATA_URL}?t=<epoch>  (cache-buster appended)
+// The server must return the JSON described in the data contract below.
+//
+// GitHub Pages example (after pushing departures.json to the repo root):
+//   https://<username>.github.io/<repo-name>/departures.json
+//
+// IMPORTANT: This must be an HTTPS URL.  HTTP is rejected by WiFiClientSecure.
+// The firmware uses client.setInsecure() by default (see USE_INSECURE_TLS).
+// -----------------------------------------------------------------------------
+#define DATA_URL  "https://fazaaaaaaaaaa.github.io/qld-bus-sign/departures.json"
+
+// -----------------------------------------------------------------------------
+// Refresh interval
+//
+// How long to deep-sleep between wake cycles, in minutes.
+// Guidelines:
+//   1–2   min  → fine on USB power; keeps countdowns accurate
+//               (each full e-ink refresh slightly ages the panel; avoid < 1 min
+//               in long-term production)
+//   2     min  → good default for smooth departure boards
+//   10–15 min  → extends battery runtime significantly (countdowns will drift)
+// -----------------------------------------------------------------------------
+#define REFRESH_MINUTES  2
+
+// -----------------------------------------------------------------------------
+// HTTP / network timeouts (milliseconds)
+// -----------------------------------------------------------------------------
+#define HTTP_TIMEOUT_MS   12000   // HTTPS response timeout (increase on slow links)
+#define WIFI_TIMEOUT_MS   20000   // Wi-Fi association timeout before giving up
+
+// -----------------------------------------------------------------------------
+// NTP configuration
+//
+// NTP is used to obtain an accurate UTC clock on each wake cycle.
+// The device waits up to NTP_TIMEOUT_MS for a valid time response.
+// At least two servers are specified for resilience.
+//
+// pool.ntp.org is reachable from nearly every public Wi-Fi.
+// time.google.com is a reliable alternative with anycast routing.
+// -----------------------------------------------------------------------------
+#define NTP_SERVER_1     "pool.ntp.org"
+#define NTP_SERVER_2     "time.google.com"
+#define NTP_TIMEOUT_MS   8000    // wait up to 8 s for NTP sync
+
+// -----------------------------------------------------------------------------
+// Display orientation
+//
+// The GDEQ0426T82 panel is physically 800×480 (landscape) but the Translink
+// SmartStop design requires PORTRAIT 480 wide x 800 tall.
+// board_render.h sets display.setRotation(EPD_ROTATION) once before drawing.
+//
+// Rotation values (GxEPD2 convention, matching Adafruit GFX):
+//   0 → landscape (800×480), bottom-cable
+//   1 → portrait  (480×800), cable on the left  ← try this first
+//   2 → landscape (800×480), top-cable (180° flip)
+//   3 → portrait  (480×800), cable on the right (180° flip of 1)
+//
+// If the display renders upside-down, change 1 → 3 (or vice versa) here.
+// No recompile of any other constant is needed.
+// -----------------------------------------------------------------------------
+#define EPD_ROTATION  1     // portrait, cable-left; flip to 3 if image is upside-down
+
+// -----------------------------------------------------------------------------
+// Display row cap
+//
+// Maximum departure rows to render.
+// Layout arithmetic (Translink SmartStop portrait design, board_render.h):
+//   PANEL: 480 wide × 800 tall (portrait)
+//   ROW_TOP = 122 px (below column header band)
+//     When alert banner is shown, ROW_TOP shifts to 155 px (+33 px for banner).
+//   ROW_H   = 92 px  (fixed — matches design_translink.py's 92 px row pitch)
+//   MAX_ROWS=6 → rows span y=122..674 (552 px); footer strip starts at y=682 ✓
+//   MAX_ROWS=7 → rows span y=122..766 (644 px); footer strip at y=774 — tight but fits ✓
+//   MAX_ROWS=8 → rows span y=122..858 — overflows 800 px ✗ — do not exceed 7.
+// Default 6 matches the design spec; set to 7 for a denser board.
+// JSON entries beyond MAX_ROWS are silently dropped.
+//   When an alert banner is shown, only 5 rows are rendered (MAX_ROWS-1) so the
+//   banner strip (33 px below the column header) doesn't collide with rows.
+//
+// Clock display: 12-hour format with AM/PM (e.g. "6:55 PM") — see board_render.h.
+// -----------------------------------------------------------------------------
+#define MAX_ROWS  6
+
+// -----------------------------------------------------------------------------
+// TLS verification
+//
+// USE_INSECURE_TLS 1 (default) — calls WiFiClientSecure::setInsecure() which
+//   skips certificate chain verification.  This is acceptable for public
+//   transit departure data that contains no credentials or PII.  A MITM could
+//   serve stale or spoofed departure times, but cannot obtain secrets.
+//
+// USE_INSECURE_TLS 0 — strict TLS.  You must load a DER-encoded CA certificate
+//   with client.loadCACert() in main.cpp.  GitHub Pages uses DigiCert Global
+//   Root G2 (or similar); the root changes when the CDN rotates its cert, so
+//   you will need to re-flash periodically.  Recommended only on secure LANs
+//   or when the display shows sensitive data.
+// -----------------------------------------------------------------------------
+#define USE_INSECURE_TLS  1
+
+// -----------------------------------------------------------------------------
+// E-ink panel — hardware pin assignments (Xteink X4, confirmed pinout)
+//
+// These match the verified GPIO map for the GDEQ0426T82 panel on the X4.
+// Change ONLY if you have a hardware revision with different wiring.
+// -----------------------------------------------------------------------------
+#define EPD_SCK   8    // SPI clock
+#define EPD_MOSI  10   // SPI MOSI (panel data in)
+#define EPD_MISO  7    // SPI MISO — not used by EPD; kept for SPI bus init
+                       // (shared with microSD slot, unused by this firmware)
+#define EPD_CS    21   // Chip select (active-low)
+#define EPD_DC    4    // Data/Command select
+#define EPD_RST   5    // Reset (active-low)
+#define EPD_BUSY  6    // Busy signal from panel (HIGH = busy)
+
+// -----------------------------------------------------------------------------
+// Battery monitor (optional)
+//
+// The X4 routes battery voltage through a resistor divider to GPIO0.
+// Set ENABLE_BATTERY_MONITOR to 1 to read it and draw a battery glyph + %
+// in the board footer/header.
+// Set to 0 to skip (saves wake time; avoids ADC noise if not calibrated).
+//
+// *** CALIBRATION REQUIRED ***
+// VBAT_DIVIDER_RATIO is hardware-specific and MUST be measured with a
+// multimeter before the battery % reading is meaningful.
+//
+// Procedure:
+//   1. Measure the actual battery voltage at the JST connector with a multimeter.
+//   2. Note the raw ADC reading printed on the serial monitor at boot
+//      ("[BATT] Raw ADC: XXXX  Vbat: YYYY mV").
+//   3. Set VBAT_DIVIDER_RATIO = measured_battery_mV / (raw_adc * VBAT_REF_MV / 4095.0).
+//
+// An obviously-wrong % (e.g. 200% or 0% with a full battery) just means
+// VBAT_DIVIDER_RATIO needs calibration — it never affects departure data.
+//
+// VBAT_LIPO_MIN_MV / VBAT_LIPO_MAX_MV: LiPo voltage range for 0–100% mapping.
+//   Standard LiPo: 3300 mV (empty) → 4200 mV (full).  Adjust if your cell differs.
+// -----------------------------------------------------------------------------
+#define ENABLE_BATTERY_MONITOR  1
+#define VBAT_DIVIDER_RATIO      2.0f   // CALIBRATE: adjust to match actual resistors (see above)
+#define VBAT_REF_MV             3300   // ESP32-C3 ADC Vref in mV (approx 3300 mV)
+#define VBAT_LIPO_MIN_MV        3300   // LiPo voltage = 0% (adjust for your cell)
+#define VBAT_LIPO_MAX_MV        4200   // LiPo voltage = 100%
+#define VBAT_LOW_MV             3400   // legacy low-battery threshold (mV); not used for % display
+
+// -----------------------------------------------------------------------------
+// Smart sleep — late-night and no-service intervals
+//
+// After rendering, the firmware chooses the next sleep duration based on:
+//   1. Local hour (derived from UTC + utc_offset_seconds from the JSON):
+//      LATE_NIGHT_START_HOUR <= localHour < LATE_NIGHT_END_HOUR
+//      → sleep LATE_NIGHT_SLEEP_MIN instead of gRefreshMin.
+//      Midnight wrap IS supported: if START > END (e.g. 23→4), the window
+//      spans midnight correctly (localHour >= 23 OR localHour < 4).
+//      If START < END (e.g. 1→4), the window is a normal same-day range.
+//   2. If no upcoming departures (all rows gone or empty JSON):
+//      → sleep NO_SERVICE_SLEEP_MIN.
+//   3. Otherwise: sleep gRefreshMin (normal, from portal/NVS/REFRESH_MINUTES default).
+//
+// Adjust to match your route's last-service and first-service hours.
+// -----------------------------------------------------------------------------
+#define LATE_NIGHT_START_HOUR   1     // hour (local, 0–23) where long sleep begins
+#define LATE_NIGHT_END_HOUR     4     // hour (local, 0–23) where long sleep ends (exclusive)
+#define LATE_NIGHT_SLEEP_MIN    60    // sleep duration during late-night window (minutes)
+#define NO_SERVICE_SLEEP_MIN    20    // sleep duration when zero upcoming departures (minutes)
+
+// =============================================================================
+// ===  v3 CONTRACT ADDITIONS  =================================================
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// FEATURE 5 — Two stops, time-of-day switch (Contract §D)
+//
+// The firmware selects which stop to display based on the local hour:
+//   Before STOP_SWITCH_HOUR → show HOME_STOP_ID  (morning: at home, waiting to leave)
+//   From   STOP_SWITCH_HOUR → show CITY_STOP_ID  (afternoon: in the city, returning)
+//
+// These must match the stop_id values in departures.json stops[].
+// STOP_SWITCH_HOUR is also exposed in the WiFiManager portal as "stop_switch_h"
+// (NVS key), letting the user adjust the cutover hour without reflashing.
+// -----------------------------------------------------------------------------
+#define HOME_STOP_ID        "011180"   // morning stop (at home)
+#define CITY_STOP_ID        "24"       // afternoon stop (in city)
+#define STOP_SWITCH_HOUR    14         // local hour 0–23; < this → HOME, >= this → CITY
+
+// -----------------------------------------------------------------------------
+// FEATURE 3 — Alert banner
+//
+// When the JSON top-level alerts[] is non-empty, a thin banner is drawn
+// immediately below the column-header band.  It shows the first alert's
+// header text, truncated to ALERT_MAX_CHARS, with " (+N)" if more than one.
+//
+// When the banner is shown, the visible departure row count is reduced by
+// ONE (i.e. MAX_ROWS-1 = 5) so the banner doesn't overlap the first row.
+// When no alerts: no banner, full MAX_ROWS shown, pixel-identical to before.
+//
+// SHOW_ALERTS 0 — disable the banner entirely (full rows, no alert text).
+// SHOW_ALERTS 1 — enable (default).
+// ALERT_MAX_CHARS — max characters of alert header to display before truncating.
+//   The banner is one line; longer text is cut with "...".
+//   Comfortable width at FreeSans9pt7b on 480 px panel ≈ 52 chars.
+// -----------------------------------------------------------------------------
+#define SHOW_ALERTS       1
+#define ALERT_MAX_CHARS   44
+
+// -----------------------------------------------------------------------------
+// FEATURE 1 — Partial refresh / change-skip
+//
+// (a) ALWAYS-ACTIVE change-skip (independent of USE_PARTIAL_REFRESH):
+//   A FNV-1a hash is computed over the content that would be rendered:
+//     selected stop_id + each visible departure's route/dest/etaNum + alert
+//     headers + stale flag + battery percentage bucket (in 10% bands).
+//   The hash is stored in NVS key "last_hash".  If the hash is unchanged
+//   since the last wake, the EPD redraw is SKIPPED entirely — the chip just
+//   goes back to sleep.  This saves a full panel refresh (~3 s) and panel wear
+//   on every cycle where nothing has changed.
+//
+// (b) USE_PARTIAL_REFRESH — GxEPD2 partial window update (optional):
+//   When 1: content changes trigger a partial update of the departures region
+//   only (faster, less panel flash).  Full refresh is used on:
+//     - First boot after power-on (fullRefreshCounter == 0)
+//     - Layout change: stop switched, alert appeared/disappeared, stale toggled
+//     - Every FULL_REFRESH_EVERY wakes (counter in RTC_DATA_ATTR) to clear ghosting
+//   When 0: always does a full refresh when content has changed — relying on
+//   (a) alone to skip unchanged frames.
+//
+//   CAVEAT: The GDEQ0426T82 is a 4-grey (SSD1677) panel.  Partial-window 4-grey
+//   rendering may produce ghosting artefacts on some panel batches.  If you see
+//   this, set USE_PARTIAL_REFRESH 0 — (a) still prevents unnecessary full
+//   refreshes when nothing changed, so you get most of the benefit.
+//
+// FULL_REFRESH_EVERY — how many wakes between forced full refreshes (ghost clear).
+//   Only relevant when USE_PARTIAL_REFRESH 1.  15 is a safe default.
+// -----------------------------------------------------------------------------
+#define USE_PARTIAL_REFRESH   1     // 0 = full refresh only (safe); 1 = partial when stable
+#define FULL_REFRESH_EVERY    15    // forced full refresh every N wakes (USE_PARTIAL_REFRESH=1)
+
+// -----------------------------------------------------------------------------
+// FEATURE 4 — OTA firmware update (Contract §A firmware block)
+//
+// FW_VERSION — this build's version string.  Compared against firmware.version
+//   in departures.json; if different AND ENABLE_OTA is 1, an OTA update is
+//   triggered.  Must be a semver-style string (e.g. "3.0.0").
+//
+// ENABLE_OTA 1 — OTA is enabled (default).  The device will download the .bin
+//   from firmware.bin_url, verify the SHA-256 against firmware.sha256, and
+//   flash itself.  On any error (network failure, SHA mismatch, flash error)
+//   the update is aborted and the device continues normally.
+// ENABLE_OTA 0 — disable all OTA logic (safe default for initial bring-up).
+//
+// Safety gates (all must pass before attempting OTA):
+//   - firmware block must be present in the JSON
+//   - firmware.version != FW_VERSION (no pointless update of same version)
+//   - firmware.bin_url must start with "https://"
+//   - firmware.sha256 must be exactly 64 lowercase hex characters
+//   - Power safe: on USB (batteryPct == -1 OR >= OTA_MIN_BATT_PCT) — when
+//     ENABLE_BATTERY_MONITOR is 0, OTA always considers power safe.
+//
+// OTA_MIN_BATT_PCT — minimum battery percentage to attempt OTA.
+//   Set conservatively: an OTA that loses power mid-flash is recoverable
+//   (ESP32 has rollback support) but wastes time.  40% is a safe default.
+// -----------------------------------------------------------------------------
+#define FW_VERSION        "3.0.0"   // THIS build's version (compare vs JSON firmware.version)
+#define ENABLE_OTA        1          // 1 = allow OTA from JSON firmware block; 0 = disabled
+#define OTA_MIN_BATT_PCT  40         // minimum battery % to start OTA (ignored if monitor off)
+
+// -----------------------------------------------------------------------------
+// FEATURE 7 — Low-battery "Plug me in" screen
+//
+// When ENABLE_BATTERY_MONITOR is 1 and battery % is a real reading (>= 0)
+// and falls to or below BATT_CRITICAL_PCT, the device renders a dedicated
+// "Plug me in" screen and deep-sleeps for BATT_PROTECT_SLEEP_MIN to protect
+// the LiPo cell.
+//
+// Hysteresis: once the critical screen fires it continues firing on every
+// subsequent wake while batteryPct <= BATT_CRITICAL_PCT.  Normal operation
+// resumes when batteryPct > BATT_RESUME_PCT (15%).  This prevents flapping
+// right at the threshold.
+//
+// Until the ADC divider is calibrated, readBatteryPct() may return a wrong
+// value (e.g. 200%) which will NOT trigger this (>BATT_CRITICAL_PCT).  The
+// gate never blocks departure display when uncalibrated — it is designed to
+// fail open.
+//
+// BATT_PROTECT_SLEEP_MIN: how long to sleep during critical mode (360 min = 6 h).
+// -----------------------------------------------------------------------------
+#define BATT_CRITICAL_PCT       10    // pct at or below which "plug me in" fires
+#define BATT_RESUME_PCT         15    // pct above which normal operation resumes
+#define BATT_PROTECT_SLEEP_MIN  360   // deep-sleep during critical mode (minutes)
