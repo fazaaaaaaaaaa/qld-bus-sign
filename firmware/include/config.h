@@ -450,14 +450,22 @@
 //   Set conservatively: an OTA that loses power mid-flash is recoverable
 //   (ESP32 has rollback support) but wastes time.  40% is a safe default.
 // -----------------------------------------------------------------------------
-#define FW_VERSION        "3.4.0"   // THIS build's version (compare vs JSON firmware.version)
+#define FW_VERSION        "3.4.1"   // THIS build's version (compare vs JSON firmware.version)
+                                    // v3.4.1: RECOVERY — stay-awake (USB) mode disabled (it caused
+                                    //         Wi-Fi instability / setup-portal churn on real hardware);
+                                    //         back to stable deep-sleep.  All other v3.4.0 fixes kept.
                                     // v3.4.0: footer now shows "Next update H:MM" (not last-updated);
                                     //         home-WiFi SSID locks to the morning stop; power button
                                     //         wakes+refreshes and LEFT/RIGHT switch routes during a
                                     //         short awake window; portal no longer re-opens on
                                     //         transient WiFi drops (only when no creds are saved).
                                     // v3.3.0: live "Updated H:MMam" footer line; far-future ETA clock.
-#define ENABLE_OTA        1          // 1 = allow OTA from JSON firmware block; 0 = disabled
+#define ENABLE_OTA        0          // v3.4.1: DISABLED.  On the X4's STOCK bootloader + Puya flash,
+                                     // an OTA writes the new app to the OTA_1 slot and repoints the
+                                     // boot selector at it — but the stock bootloader cannot boot
+                                     // OTA_1, producing an "invalid header: 0xffffffff" brick loop.
+                                     // Update via the serial flash script instead (it writes app0 at
+                                     // 0x10000 and resets otadata — the only bootable configuration).
 #define OTA_MIN_BATT_PCT  40         // minimum battery % to start OTA (ignored if monitor off)
 
 // -----------------------------------------------------------------------------
