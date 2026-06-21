@@ -219,8 +219,12 @@ interface RtStatus {
 // ---------------------------------------------------------------------------
 
 const KV_KEY_DEPARTURES = ["departures_v3"] as const;
-const KV_KEY_SCHEDULE   = ["schedule_cache_v3"] as const;
 const KV_KEY_RT_STATUS  = ["rt_status"] as const;
+
+// The v3 stop_schedule.json (~100 KB) exceeds Deno KV's 64 KB per-value limit,
+// so the heavy schedule is cached in module memory (within the cron isolate),
+// NOT in KV. It is refetched on a cold isolate or after SCHEDULE_TTL_HOURS.
+let memSchedule: ScheduleCache | null = null;
 
 // ---------------------------------------------------------------------------
 // Timezone helpers  (unchanged from v2)
@@ -564,7 +568,7 @@ async function fetchFirmware(): Promise<FirmwareBlock | undefined> {
 // Schedule fetch + cache
 // ---------------------------------------------------------------------------
 
-async function fetchSchedule(kv: Deno.Kv): Promise<StopScheduleV3> {
+async function fetchSchedule(_kv?: Deno.Kv): Promise<StopScheduleV3> {
   const url = CONFIG.STOP_SCHEDULE_URL;
   console.info(`Fetching stop_schedule.json v3 from ${url} …`);
   const controller = new AbortController();
@@ -578,7 +582,7 @@ async function fetchSchedule(kv: Deno.Kv): Promise<StopScheduleV3> {
     }
     const totalTrips = Object.values(schedule.stops).reduce((n, s) => n + s.trips.length, 0);
     const cache: ScheduleCache = { schedule, fetched_at: Math.floor(Date.now() / 1000) };
-    await kv.set(KV_KEY_SCHEDULE, cache);
+    memSchedule = cache;
     console.info(`stop_schedule.json v3 cached (${Object.keys(schedule.stops).length} stops, ${totalTrips} trips)`);
     return schedule;
   } finally {
@@ -586,19 +590,20 @@ async function fetchSchedule(kv: Deno.Kv): Promise<StopScheduleV3> {
   }
 }
 
-async function getSchedule(kv: Deno.Kv): Promise<StopScheduleV3 | null> {
-  const entry = await kv.get<ScheduleCache>(KV_KEY_SCHEDULE);
-  if (!entry.value) return null;
-  const ageHours = (Date.now() / 1000 - entry.value.fetched_at) / 3600;
+function getSchedule(_kv?: Deno.Kv): StopScheduleV3 | null {
+  const entry = memSchedule;
+  if (!entry) return null;
+  const ageHours = (Date.now() / 1000 - entry.fetched_at) / 3600;
   if (ageHours > CONFIG.SCHEDULE_TTL_HOURS) {
     console.info(`Schedule cache stale (${ageHours.toFixed(1)}h old), will refresh`);
+    memSchedule = null;
     return null;
   }
-  return entry.value.schedule;
+  return entry.schedule;
 }
 
 async function ensureSchedule(kv: Deno.Kv): Promise<StopScheduleV3> {
-  let schedule = await getSchedule(kv);
+  let schedule = getSchedule(kv);
   if (!schedule) schedule = await fetchSchedule(kv);
   return schedule;
 }
