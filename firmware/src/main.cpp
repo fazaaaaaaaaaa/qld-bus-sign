@@ -1036,6 +1036,7 @@ static bool isHexSha256(const char* s)
     }
     return true;
 }
+#endif // ENABLE_OTA
 
 // =============================================================================
 // setup() — runs once per wake cycle.
