@@ -45,6 +45,25 @@ jobs:
         # esptool pinned <5 so the `merge_bin` subcommand + underscore flags are stable.
         run: pip install platformio "esptool<5"
 
+      - name: Inject baked-in Wi-Fi password(s) from GitHub secrets
+        # Writes firmware/include/wifi_secrets.h from the repo secrets WIFI1_PASS
+        # (and optional WIFI2_PASS).  config.h includes it via __has_include, so
+        # the passwords are compiled into the firmware WITHOUT ever appearing in
+        # this public repo.  Generated on the runner only; NOT committed (the
+        # commit step adds public_assets/* exclusively).  Logs print the password
+        # LENGTH only, never the value.
+        env:
+          WIFI1_PASS: ${{ secrets.WIFI1_PASS }}
+          WIFI2_PASS: ${{ secrets.WIFI2_PASS }}
+        run: |
+          printf '#pragma once\n' > firmware/include/wifi_secrets.h
+          printf '#define WIFI1_PASS "%s"\n' "$WIFI1_PASS" >> firmware/include/wifi_secrets.h
+          printf '#define WIFI2_PASS "%s"\n' "$WIFI2_PASS" >> firmware/include/wifi_secrets.h
+          echo "wifi_secrets.h written (WIFI1 passLen=${#WIFI1_PASS}, WIFI2 passLen=${#WIFI2_PASS})"
+          if [ -z "$WIFI1_PASS" ] && [ -z "$WIFI2_PASS" ]; then
+            echo "::warning::No WIFI1_PASS/WIFI2_PASS secret set — firmware will show 'set GitHub secret'."
+          fi
+
       - name: Build firmware (env xteink-x4)
         # First real compile. This step fails loudly if the firmware does not build.
         run: pio run --environment xteink-x4
