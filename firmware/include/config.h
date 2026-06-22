@@ -450,7 +450,11 @@
 //   Set conservatively: an OTA that loses power mid-flash is recoverable
 //   (ESP32 has rollback support) but wastes time.  40% is a safe default.
 // -----------------------------------------------------------------------------
-#define FW_VERSION        "3.4.1"   // THIS build's version (compare vs JSON firmware.version)
+#define FW_VERSION        "3.4.2"   // THIS build's version (compare vs JSON firmware.version)
+                                    // v3.4.2: FIX the "updates once then re-opens WiFi setup" bug —
+                                    //         the portal now saves the ACTUALLY-connected WiFi creds
+                                    //         (WiFi.SSID()/WiFi.psk()), so they persist and every wake
+                                    //         reconnects + refreshes instead of falling back to setup.
                                     // v3.4.1: RECOVERY — stay-awake (USB) mode disabled (it caused
                                     //         Wi-Fi instability / setup-portal churn on real hardware);
                                     //         back to stable deep-sleep.  All other v3.4.0 fixes kept.
