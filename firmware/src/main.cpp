@@ -1123,28 +1123,51 @@ void setup()
                   gRotation, display.width(), display.height());
 
     // ---- 4. Wi-Fi connection -----------------------------------------------
-    if (strlen(WIFI_SSID) > 0) {
-        // Path A: hardcoded credentials
-        Serial.printf("[WIFI] Hardcoded SSID mode — connecting to \"%s\"...\n", WIFI_SSID);
+    if (BAKED_WIFI_ENABLE && (strlen(WIFI1_SSID) > 0 || strlen(WIFI2_SSID) > 0)) {
+        // Path A (v3.5.0): Wi-Fi BAKED INTO THE FIRMWARE — no NVS, no portal.
+        // This X4's Puya flash does not persist NVS reliably, so portal-saved
+        // creds vanished on reboot and the sign kept dropping back to setup.
+        // The credentials are compiled in (passwords injected from GitHub
+        // secrets at build time), so every wake simply reconnects + refreshes.
+        // WiFiMulti lets 1 or 2 baked networks both work — whichever is in
+        // range wins.
+        WiFi.persistent(false);   // don't write creds to the (non-persisting) NVS
         WiFi.mode(WIFI_STA);
-        WiFi.begin(WIFI_SSID, WIFI_PASS);
-        {
-            uint32_t wifi_start = millis();
-            while (WiFi.status() != WL_CONNECTED) {
-                if (millis() - wifi_start > WIFI_TIMEOUT_MS) {
-                    Serial.println("[WIFI] Timeout (hardcoded SSID)");
-                    wifiFailCount++;
-                    showStatusMessage("WiFi failed", WIFI_SSID);
-                    prefs.end();
-                    goToSleep();
-                    return;
-                }
-                delay(250);
-                Serial.print('.');
-            }
+
+        WiFiMulti bakedMulti;
+        int nBaked = 0;
+        if (strlen(WIFI1_SSID) > 0 && strlen(WIFI1_PASS) > 0) {
+            bakedMulti.addAP(WIFI1_SSID, WIFI1_PASS); nBaked++;
+            Serial.printf("[WIFI] Baked-in net 1: \"%s\"\n", WIFI1_SSID);
+        }
+        if (strlen(WIFI2_SSID) > 0 && strlen(WIFI2_PASS) > 0) {
+            bakedMulti.addAP(WIFI2_SSID, WIFI2_PASS); nBaked++;
+            Serial.printf("[WIFI] Baked-in net 2: \"%s\"\n", WIFI2_SSID);
+        }
+
+        if (nBaked == 0) {
+            // An SSID is set but NO password was compiled in — i.e. the GitHub
+            // secret wasn't set at build time.  Say so plainly and sleep; do not
+            // loop a portal that can't persist on this flash anyway.
+            Serial.println("[WIFI] No baked password compiled — set the GitHub secret + rebuild.");
+            showStatusMessage("WiFi not built-in", "set GitHub secret");
+            prefs.end();
+            goToSleep();
+            return;
+        }
+
+        Serial.print("[WIFI] Baked-in connecting");
+        if (bakedMulti.run(WIFI_TIMEOUT_MS) != WL_CONNECTED) {
+            wifiFailCount++;
+            Serial.println("\n[WIFI] Baked-in connect failed — will retry next wake (no portal).");
+            showStatusMessage("WiFi unavailable", "retrying next wake");
+            prefs.end();
+            goToSleep();
+            return;
         }
         wifiFailCount = 0;
-        Serial.printf("\n[WIFI] Connected — IP: %s\n", WiFi.localIP().toString().c_str());
+        Serial.printf("\n[WIFI] Connected — SSID \"%s\"  IP: %s\n",
+                      WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
 
     } else {
         // Path B: phone captive-portal flow
