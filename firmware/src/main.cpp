@@ -1322,7 +1322,21 @@ void setup()
 
                     // Remember the freshly-configured network (v3.1, Feature A)
                     // so future wakes auto-join it via WiFiMulti.
-                    addWifiNetwork(prefs, wm.getWiFiSSID(), wm.getWiFiPass());
+                    //
+                    // v3.4.2 FIX (the "updates once then re-opens setup" bug):
+                    // read the ACTUALLY-connected credentials from WiFi.SSID()/
+                    // WiFi.psk().  wm.getWiFiSSID()/getWiFiPass() come back EMPTY
+                    // after a portal connect on this core, so addWifiNetwork() was
+                    // saving nothing -> every later wake found no creds and jumped
+                    // straight back to the WiFi setup portal.  Fall back to the wm
+                    // getters only if WiFi.* are somehow empty.
+                    String connSsid = WiFi.SSID();
+                    String connPass = WiFi.psk();
+                    if (connSsid.length() == 0) connSsid = wm.getWiFiSSID();
+                    if (connPass.length() == 0) connPass = wm.getWiFiPass();
+                    Serial.printf("[NVS]  Saving portal creds: ssid=\"%s\"  passLen=%d\n",
+                                  connSsid.c_str(), (int)connPass.length());
+                    addWifiNetwork(prefs, connSsid, connPass);
 
                     display.init(115200, /*initial=*/false, /*reset_duration=*/10);
                     display.setRotation(gRotation);
