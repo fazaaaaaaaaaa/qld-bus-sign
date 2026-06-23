@@ -396,7 +396,8 @@ static void savePortalSettings(Preferences& prefs,
 // =============================================================================
 // showStatusMessage() — draw a short status string on the panel.
 // =============================================================================
-static void showStatusMessage(const char* line1, const char* line2 = nullptr)
+static void showStatusMessage(const char* line1, const char* line2 = nullptr,
+                              bool showRetry = true)
 {
     display.setFullWindow();
     display.firstPage();
@@ -411,10 +412,15 @@ static void showStatusMessage(const char* line1, const char* line2 = nullptr)
             display.setCursor(20, 80);
             display.print(line2);
         }
-        display.setTextSize(1);
-        display.setCursor(20, 130);
-        display.printf("Retrying in %d min",
-                       (gRefreshMin > 0) ? gRefreshMin : REFRESH_MINUTES);
+        // The "Retrying in N min" line only makes sense for transient-failure
+        // screens. Callers that are NOT about to retry (e.g. the power-off screen)
+        // pass showRetry=false so it isn't shown misleadingly.
+        if (showRetry) {
+            display.setTextSize(1);
+            display.setCursor(20, 130);
+            display.printf("Retrying in %d min",
+                           (gRefreshMin > 0) ? gRefreshMin : REFRESH_MINUTES);
+        }
     } while (display.nextPage());
     display.hibernate();
 }
@@ -578,7 +584,7 @@ static bool detectPowerAwake()
 static void powerOff()
 {
     Serial.println("[PWR]  POWER pressed -> OFF (deep sleep; press POWER to turn on)");
-    showStatusMessage("Sign is OFF", "Press the power button to turn on");
+    showStatusMessage("Sign is OFF", "Press the power button to turn on", /*showRetry=*/false);
 
     // Wait for the button to be released so we don't immediately wake ourselves.
     pinMode(BTN_POWER_PIN, INPUT_PULLUP);
