@@ -552,15 +552,43 @@ static void armButtonWakeup()
 // =============================================================================
 static bool detectPowerAwake()
 {
-    // v3.4.1 RECOVERY: stay-awake mode is DISABLED.  On real hardware the
-    // esp_restart-every-refresh loop destabilised Wi-Fi (rapid reconnects) and
-    // could leave the sign churning / unable to settle on the setup portal.  We
-    // now ALWAYS use the proven deep-sleep path (identical to v3.3.x stability).
-    // The power_mode setting + portal field are retained for a future, properly
-    // tested awake rework that keeps Wi-Fi UP across refreshes instead of rebooting.
+    // v3.6.0: STAY-AWAKE is now the default and the deep-sleep-between-refreshes
+    // path is retired.  The X4's deep-sleep TIMER wake proved unreliable on real
+    // hardware (the board would freeze instead of refreshing), so between refreshes
+    // we keep the CPU awake and re-render every interval on a reliable millis()
+    // timer via a clean restart (see stayAwakeAndPoll()).  The Wi-Fi instability
+    // that forced the v3.4.1 disable is gone now that Wi-Fi is BAKED INTO the
+    // firmware (no captive portal to churn on).  The ONLY deep sleeps left are the
+    // user pressing POWER to turn the sign OFF, and the battery-critical sleep.
     (void)gPowerMode;
-    Serial.println("[PWR]  Stay-awake disabled (v3.4.1) — using stable deep-sleep");
-    return false;
+    Serial.println("[PWR]  Stay-awake ENABLED (v3.6.0) — no deep sleep between refreshes");
+    return true;
+}
+
+// =============================================================================
+// powerOff() — v3.6.0 one-button OFF switch
+//
+// Called when POWER is pressed while the sign is awake.  Shows a brief "off"
+// screen, then deep-sleeps with ONLY the power button (GPIO3) armed as the wake
+// source (NO timer) — so the sign stays off until POWER is pressed again, which
+// boots a fresh cycle (= turns it back on, with a fresh fetch + render).  This
+// and the battery-critical sleep are the ONLY deep sleeps in v3.6.0.  Never
+// returns.
+// =============================================================================
+static void powerOff()
+{
+    Serial.println("[PWR]  POWER pressed -> OFF (deep sleep; press POWER to turn on)");
+    showStatusMessage("Sign is OFF", "Press the power button to turn on");
+
+    // Wait for the button to be released so we don't immediately wake ourselves.
+    pinMode(BTN_POWER_PIN, INPUT_PULLUP);
+    while (digitalRead(BTN_POWER_PIN) == LOW) delay(10);
+    delay(100);
+
+    Serial.flush();
+    esp_deep_sleep_enable_gpio_wakeup(1ULL << (uint32_t)BTN_POWER_PIN,
+                                      ESP_GPIO_WAKEUP_GPIO_LOW);
+    esp_deep_sleep_start();
 }
 
 // =============================================================================
@@ -578,7 +606,12 @@ static void stayAwakeAndPoll(int refreshMin)
     uint32_t windowMs = (uint32_t)((refreshMin > 0) ? refreshMin : 1) * 60UL * 1000UL;
     uint32_t t0 = millis();
     pinMode(BTN_POWER_PIN, INPUT_PULLUP);
-    Serial.printf("[AWAKE] USB/awake mode — polling buttons for %lu ms, then refreshing\n",
+    // v3.6.0: wait for the power button to be released first, so the press that
+    // turned the sign ON (woke it from the OFF state) is not immediately read as
+    // an OFF press.
+    while (digitalRead(BTN_POWER_PIN) == LOW) delay(10);
+    delay(50);
+    Serial.printf("[AWAKE] Stay-awake — polling buttons for %lu ms, then refreshing\n",
                   (unsigned long)windowMs);
 
     while ((millis() - t0) < windowMs) {
@@ -596,15 +629,12 @@ static void stayAwakeAndPoll(int refreshMin)
                 esp_restart();
             }
         }
-        // POWER → refresh now
+        // POWER → turn the sign OFF (v3.6.0). Press POWER again later to turn it
+        // back on (a fresh boot = a fresh fetch + render).
         if (digitalRead(BTN_POWER_PIN) == LOW) {
             delay(50);
-            if (digitalRead(BTN_POWER_PIN) == LOW) {
-                uint32_t rel = millis();
-                while (digitalRead(BTN_POWER_PIN) == LOW && (millis() - rel) < 4000UL) delay(20);
-                Serial.println("[AWAKE] POWER press -> refresh now (restart)");
-                Serial.flush(); delay(20);
-                esp_restart();
+            if (digitalRead(BTN_POWER_PIN) == LOW) {   // debounced press
+                powerOff();   // off screen + deep sleep until next press; never returns
             }
         }
         delay(40);   // poll pacing
@@ -1657,6 +1687,10 @@ void setup()
                           batteryPct, BATT_CRITICAL_PCT);
             drawLowBatteryScreen(display, batteryPct);
             prefs.end();
+            // v3.6.0: force a REAL deep sleep here even in stay-awake mode — staying
+            // awake on a critically low battery would keep draining it. This protects
+            // the cell; the sign wakes on the timer (or POWER) to re-check.
+            gPowerAwake = false;
             goToSleep(BATT_PROTECT_SLEEP_MIN);
             return;
         } else if (battCritState == 1 && batteryPct > BATT_RESUME_PCT) {
