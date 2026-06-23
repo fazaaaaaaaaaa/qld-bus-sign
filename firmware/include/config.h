@@ -495,7 +495,10 @@
 //   Set conservatively: an OTA that loses power mid-flash is recoverable
 //   (ESP32 has rollback support) but wastes time.  40% is a safe default.
 // -----------------------------------------------------------------------------
-#define FW_VERSION        "3.6.0"   // THIS build's version (compare vs JSON firmware.version)
+#define FW_VERSION        "3.6.1"   // THIS build's version (compare vs JSON firmware.version)
+                                    // v3.6.1: polish — the power-OFF screen no longer shows a
+                                    //         misleading "Retrying in N min" line (it's off until you
+                                    //         press POWER, not retrying). No behaviour change otherwise.
                                     // v3.6.0: NO deep sleep between refreshes — the sign now STAYS
                                     //         AWAKE and re-renders every refresh interval on a reliable
                                     //         millis() timer (the X4's deep-sleep timer-wake was
