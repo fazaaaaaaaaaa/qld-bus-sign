@@ -495,7 +495,14 @@
 //   Set conservatively: an OTA that loses power mid-flash is recoverable
 //   (ESP32 has rollback support) but wastes time.  40% is a safe default.
 // -----------------------------------------------------------------------------
-#define FW_VERSION        "3.5.0"   // THIS build's version (compare vs JSON firmware.version)
+#define FW_VERSION        "3.6.0"   // THIS build's version (compare vs JSON firmware.version)
+                                    // v3.6.0: NO deep sleep between refreshes — the sign now STAYS
+                                    //         AWAKE and re-renders every refresh interval on a reliable
+                                    //         millis() timer (the X4's deep-sleep timer-wake was
+                                    //         unreliable and left the board frozen). The POWER button is
+                                    //         now a real ON/OFF switch: press it to turn the sign off
+                                    //         (deep sleep until pressed again). Only deep sleeps left:
+                                    //         user-pressed OFF + the battery-critical protective sleep.
                                     // v3.5.0: BAKED-IN Wi-Fi — credentials are now compiled into the
                                     //         firmware (WiFiMulti, 1-2 networks) and the captive portal
                                     //         is no longer used.  This finally fixes the "updates once
