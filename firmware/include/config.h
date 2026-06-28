@@ -68,7 +68,7 @@
 #endif
 
 #ifndef WIFI2_SSID
-#define WIFI2_SSID ""         // second network — fill the SSID in when you have it
+#define WIFI2_SSID "GCLEGAL-GUEST"   // second network (fallback); password via GitHub secret WIFI2_PASS
 #endif
 #ifndef WIFI2_PASS
 #define WIFI2_PASS ""         // injected from GitHub secret WIFI2_PASS at build time
@@ -495,7 +495,12 @@
 //   Set conservatively: an OTA that loses power mid-flash is recoverable
 //   (ESP32 has rollback support) but wastes time.  40% is a safe default.
 // -----------------------------------------------------------------------------
-#define FW_VERSION        "3.6.1"   // THIS build's version (compare vs JSON firmware.version)
+#define FW_VERSION        "3.6.2"   // THIS build's version (compare vs JSON firmware.version)
+                                    // v3.6.2: add a second baked-in Wi-Fi network (GCLEGAL-GUEST) as a
+                                    //         fallback — WiFiMulti connects to whichever of the two
+                                    //         networks is in range. Built on the stable 3.6.1 base; the
+                                    //         PuyaStore persistent-storage work (was tagged 3.7.0) is
+                                    //         deferred and NOT in this build.
                                     // v3.6.1: polish — the power-OFF screen no longer shows a
                                     //         misleading "Retrying in N min" line (it's off until you
                                     //         press POWER, not retrying). No behaviour change otherwise.
